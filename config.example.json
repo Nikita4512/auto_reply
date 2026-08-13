@@ -1,0 +1,45 @@
+{
+    "_comment": "Copy this file to config.json and fill in real values before running bot.py",
+
+    "portal_url": "",
+    "username": "",
+    "password": "",
+
+    "excel_path": "FTIR_Replies.xlsx",
+    "log_file": "bot.log",
+
+    "wait_timeout_seconds": 15,
+    "paste_retry_count": 3,
+    "headless": false,
+
+    "dry_run": true,
+    "delay_between_rows_seconds": 2,
+    "verbose_logging": false,
+
+    "_dry_run_comment": "Set dry_run to true for your first run. The bot will paste and verify replies but will NOT click Save. Set to false only after reviewing the dry-run log.",
+    "_verbose_logging_comment": "When true, paste-verification failures log the full expected/actual text to the log file. Keep false for production to avoid storing sensitive reply content in the log.",
+
+    "_selectors_comment": "Fill these after inspecting the real portal HTML. See README for guidance.",
+    "selectors": {
+        "username_field":           "<TODO: selector for login username input>",
+        "password_field":           "<TODO: selector for login password input>",
+        "login_button":             "<TODO: selector for login submit button>",
+        "post_login_element":       "<TODO: selector for element visible only after successful login>",
+
+        "quick_search_box":         "<TODO: selector for Quick Search input>",
+        "search_submit_button":     "<TODO: selector for search submit button, or leave blank to use Enter key>",
+
+        "results_container":        "<TODO: selector for the search-results container/table>",
+        "result_rows":              "<TODO: selector for individual result rows within the container>",
+        "result_ftir_text":         "<TODO: selector for the FTIR number text inside a result row>",
+
+        "record_header_ftir":       "<TODO: selector for the FTIR number shown in the opened record header>",
+        "reply_individually_button":"<TODO: selector for 'Reply Individually' button/link>",
+        "reply_textarea":           "<TODO: selector for the reply text input field (textarea or contenteditable)>",
+        "save_button":              "<TODO: selector for the Save button on the reply form>",
+
+        "save_confirmation":        "<TODO: selector for element that appears on successful save>",
+        "save_error_banner":        "<TODO: selector for error banner that appears on failed save, or leave blank>",
+        "logout_button":            "<TODO: selector for logout button, or leave blank if no logout is available>"
+    }
+}
