@@ -60,6 +60,12 @@ COL_STATUS = "Status"
 STATUS_COMPLETED = "Completed"
 STATUS_PENDING = "Pending"
 STATUS_DRY_RUN_OK = "Dry-run OK"
+STATUS_ALREADY_DONE = "Already Done"
+
+
+class AlreadyDoneError(Exception):
+    """Raised when an FTIR record in SIFT already has a response written."""
+    pass
 
 # ---------------------------------------------------------------------------
 # --- redaction --- Helpers for safe logging of sensitive data
@@ -202,9 +208,7 @@ def build_row_queue(sheet, col_map: dict, logger: logging.Logger) -> list:
     Build a list of row numbers to process, strictly top-to-bottom.
     Includes rows where Status is blank, 'Pending', or starts with 'Failed:'
     (so re-runs automatically retry failures).
-    Skips rows that are 'Completed' or 'Dry-run OK'.
-    This is computed once but we re-check Status fresh before processing each row
-    (see main loop) to guard against stale-index bugs.
+    Skips rows that are 'Completed', 'Already Done', or 'Dry-run OK'.
     """
     queue = []
     ftir_col = col_map[COL_FTIR]
@@ -221,8 +225,8 @@ def build_row_queue(sheet, col_map: dict, logger: logging.Logger) -> list:
         status_str = str(status_val).strip() if status_val else ""
         status_lower = status_str.lower()
 
-        # --- resume --- Skip only Completed and Dry-run OK rows; retry everything else
-        if status_lower in (STATUS_COMPLETED.lower(), STATUS_DRY_RUN_OK.lower()):
+        # Skip Completed, Already Done, and Dry-run OK rows; retry everything else
+        if status_lower in (STATUS_COMPLETED.lower(), STATUS_DRY_RUN_OK.lower(), STATUS_ALREADY_DONE.lower()):
             logger.debug(f"  Skipped row {row_idx}: Status='{status_str}'")
         else:
             queue.append(row_idx)
@@ -256,14 +260,14 @@ def preflight_validate(sheet, col_map: dict, config: dict, logger: logging.Logge
     """
     Scan the entire Excel sheet and report:
     - Total rows with FTIR numbers
-    - Rows that are already Completed
+    - Rows that are already Completed / Already Done
     - Rows that are Dry-run OK
     - Rows that are pending (blank / Pending / Failed)
     - Rows with blank FTIR Number
     - Rows with blank Reply text
     - Duplicate FTIR numbers
-    - Unconfigured CSS selectors (<TODO:...>) in config.json
-    Returns a summary dict. Caller decides whether to proceed.
+    - Unconfigured CSS selectors in config.json
+    Returns a summary dict.
     """
     ftir_col = col_map[COL_FTIR]
     reply_col = col_map[COL_REPLY]
@@ -271,6 +275,7 @@ def preflight_validate(sheet, col_map: dict, config: dict, logger: logging.Logge
 
     total = 0
     completed = 0
+    already_done = 0
     dry_run_ok = 0
     pending = 0
     blank_ftir_rows = []
@@ -305,6 +310,9 @@ def preflight_validate(sheet, col_map: dict, config: dict, logger: logging.Logge
         if status_str.lower() == STATUS_COMPLETED.lower():
             completed += 1
             continue
+        if status_str.lower() == STATUS_ALREADY_DONE.lower():
+            already_done += 1
+            continue
         if status_str.lower() == STATUS_DRY_RUN_OK.lower():
             dry_run_ok += 1
             continue
@@ -336,6 +344,7 @@ def preflight_validate(sheet, col_map: dict, config: dict, logger: logging.Logge
     return {
         "total": total,
         "completed": completed,
+        "already_done": already_done,
         "dry_run_ok": dry_run_ok,
         "pending": pending,
         "blank_ftir_rows": blank_ftir_rows,
@@ -356,9 +365,11 @@ def print_preflight_and_confirm(summary: dict, dry_run: bool, logger: logging.Lo
     logger.info("=" * 70)
     logger.info(f"  Total data rows     : {summary['total']}")
     logger.info(f"  Already Completed   : {summary['completed']} (will be skipped)")
+    if summary.get('already_done', 0) > 0:
+        logger.info(f"  Already Done        : {summary['already_done']} (will be skipped)")
     logger.info(f"  Dry-run OK          : {summary['dry_run_ok']} (will be skipped)")
     logger.info(f"  Pending / to process: {summary['pending']}")
-    logger.info(f"  Mode                : {'DRY RUN (Save will NOT be clicked)' if dry_run else 'LIVE RUN'}")
+    logger.info(f"  Mode                : {'DRY RUN (Save will NOT be clicked)' if dry_run else 'LIVE RUN (Will Save & Update Excel)'}")
 
     if summary["issues"]:
         logger.info("")
@@ -918,6 +929,48 @@ def verify_record_header(driver, ftir_number: str, sel: dict, timeout: int, logg
     logger.debug("  Record header verified (exact match) ✓")
 
 
+def check_existing_reply(driver, textarea, logger: logging.Logger):
+    """
+    Check if the FTIR record in SIFT already has a response written or is completed.
+    Raises AlreadyDoneError if a response is already present so it won't be overwritten.
+    """
+    # 1. Check if SIFT marks the Feedback/Individual Reply section as Completed
+    try:
+        is_completed = driver.execute_script("""
+            var bodyText = (document.body && document.body.innerText) ? document.body.innerText : "";
+            if (bodyText.indexOf("FEEDBACK [Completed]") !== -1 || 
+                bodyText.indexOf("INDIVIDUAL REPLY [Completed]") !== -1 ||
+                bodyText.indexOf("Individual Reply [Completed]") !== -1) {
+                return true;
+            }
+            var fd = document.querySelector("input[name='buttonControl.fdKanryoIndividual']");
+            if (fd && fd.value === "true") {
+                return true;
+            }
+            return false;
+        """)
+        if is_completed:
+            logger.info("  SIFT record indicates Individual Reply is already completed.")
+            raise AlreadyDoneError("Individual Reply is already marked as Completed in SIFT.")
+    except AlreadyDoneError:
+        raise
+    except Exception:
+        pass
+
+    # 2. Check if the reply textarea already contains text
+    if textarea:
+        try:
+            current_val = (textarea.get_attribute("value") or textarea.text or "").strip()
+            if current_val:
+                preview = current_val[:35].replace("\n", " ")
+                logger.info(f"  FTIR record already has a response written: '{preview}...' ({len(current_val)} chars).")
+                raise AlreadyDoneError(f"Response already written: '{preview}...'")
+        except AlreadyDoneError:
+            raise
+        except Exception:
+            pass
+
+
 def open_reply_field(driver, sel: dict, timeout: int, logger: logging.Logger):
     """
     On SIFT FTIR record page (SYQAA090):
@@ -1201,32 +1254,39 @@ def run_bot(
             reply_text = sample_reply or "This is a sample test reply for FTIR processing verification."
             logger.info(f"Processing Single FTIR: {redact_ftir(target_ftir)}")
 
-            # 1. Search FTIR
-            search_ftir(driver, target_ftir, sel, timeout, logger)
-
-            # 2. Open record if in search results table
             try:
-                select_correct_result(driver, target_ftir, sel, timeout=5, logger=logger)
-                time.sleep(1)
-            except Exception as search_err:
-                logger.debug(f"Direct result row select skipped/not needed: {search_err}")
+                # 1. Search FTIR
+                search_ftir(driver, target_ftir, sel, timeout, logger)
 
-            # 3. Select 'Reply individually.' and get textarea
-            textarea = open_reply_field(driver, sel, timeout, logger)
+                # 2. Open record if in search results table
+                try:
+                    select_correct_result(driver, target_ftir, sel, timeout=5, logger=logger)
+                    time.sleep(1)
+                except Exception as search_err:
+                    logger.debug(f"Direct result row select skipped/not needed: {search_err}")
 
-            # 4. Paste reply
-            paste_ok = paste_reply(driver, textarea, reply_text, sel, max_paste_retries, verbose_logging, logger)
-            if not paste_ok:
-                logger.error("Paste verification failed!")
-                return
+                # 3. Select 'Reply individually.' and get textarea
+                textarea = open_reply_field(driver, sel, timeout, logger)
 
-            # 5. Save or Dry Run
-            if dry_run:
-                logger.info("DRY RUN OK: Reply pasted & verified. Save was NOT clicked.")
-            else:
-                pre_save_recheck(driver, target_ftir, reply_text, sel, timeout, logger)
-                click_save_and_confirm(driver, sel, timeout, logger)
-                logger.info("✓ Single FTIR process completed & saved successfully!")
+                # Check if response is already present in SIFT
+                check_existing_reply(driver, textarea, logger)
+
+                # 4. Paste reply
+                paste_ok = paste_reply(driver, textarea, reply_text, sel, max_paste_retries, verbose_logging, logger)
+                if not paste_ok:
+                    logger.error("Paste verification failed!")
+                    return
+
+                # 5. Save or Dry Run
+                if dry_run:
+                    logger.info("DRY RUN OK: Reply pasted & verified. Save was NOT clicked.")
+                else:
+                    pre_save_recheck(driver, target_ftir, reply_text, sel, timeout, logger)
+                    click_save_and_confirm(driver, sel, timeout, logger)
+                    logger.info("✓ Single FTIR process completed & saved successfully in SIFT!")
+
+            except AlreadyDoneError as ad:
+                logger.info(f"✓ Single FTIR {redact_ftir(target_ftir)}: {ad} (No overwrite needed).")
 
             return
 
@@ -1257,6 +1317,7 @@ def run_bot(
             return
 
         completed = 0
+        already_done_count = 0
         failed = 0
         skipped = 0
         dry_run_ok_count = 0
@@ -1270,7 +1331,7 @@ def run_bot(
             current_status = sheet.cell(row=row_idx, column=status_col).value
             current_status_str = str(current_status).strip() if current_status else ""
 
-            if current_status_str.lower() in (STATUS_COMPLETED.lower(), STATUS_DRY_RUN_OK.lower()):
+            if current_status_str.lower() in (STATUS_COMPLETED.lower(), STATUS_DRY_RUN_OK.lower(), STATUS_ALREADY_DONE.lower()):
                 logger.info(f"[{queue_idx}/{total_rows}] Row {row_idx}: already '{current_status_str}', skipping.")
                 skipped += 1
                 continue
@@ -1289,7 +1350,7 @@ def run_bot(
                 failure_reasons.append(f"Row {row_idx}: {reason}")
                 continue
 
-            logger.info(f"[{queue_idx}/{total_rows}] Processing row {row_idx}...")
+            logger.info(f"[{queue_idx}/{total_rows}] Processing row {row_idx} (FTIR={redact_ftir(ftir_number)})...")
 
             try:
                 search_ftir(driver, ftir_number, sel, timeout, logger)
@@ -1302,6 +1363,9 @@ def run_bot(
 
                 textarea = open_reply_field(driver, sel, timeout, logger)
 
+                # Check if reply is already written / completed in SIFT
+                check_existing_reply(driver, textarea, logger)
+
                 paste_ok = paste_reply(driver, textarea, reply_text, sel, max_paste_retries, verbose_logging, logger)
                 if not paste_ok:
                     reason = f"Paste verification failed"
@@ -1313,13 +1377,18 @@ def run_bot(
                 if dry_run:
                     update_row_status(wb, sheet, col_map, row_idx, STATUS_DRY_RUN_OK, excel_path, logger)
                     dry_run_ok_count += 1
-                    logger.info(f"  ✓ Row {row_idx} → Dry-run OK")
+                    logger.info(f"  ✓ Row {row_idx} → Dry-run OK (Excel updated)")
                 else:
                     pre_save_recheck(driver, ftir_number, reply_text, sel, timeout, logger)
                     click_save_and_confirm(driver, sel, timeout, logger)
                     update_row_status(wb, sheet, col_map, row_idx, STATUS_COMPLETED, excel_path, logger)
                     completed += 1
-                    logger.info(f"  ✓ Row {row_idx} completed successfully.")
+                    logger.info(f"  ✓ Row {row_idx} → Completed (Saved in SIFT & Excel updated)")
+
+            except AlreadyDoneError as ad:
+                update_row_status(wb, sheet, col_map, row_idx, STATUS_ALREADY_DONE, excel_path, logger)
+                already_done_count += 1
+                logger.info(f"  ✓ Row {row_idx} → {STATUS_ALREADY_DONE} (Existing response detected in SIFT; Excel updated)")
 
             except Exception as e:
                 reason = str(e)[:200]
@@ -1336,6 +1405,18 @@ def run_bot(
                 time.sleep(delay_between_rows)
 
         wb.close()
+
+        logger.info("")
+        logger.info("=" * 70)
+        logger.info("RUN COMPLETED — SUMMARY")
+        logger.info("=" * 70)
+        logger.info(f"  Total Queued        : {total_rows}")
+        logger.info(f"  Completed & Saved   : {completed}")
+        logger.info(f"  Already Done        : {already_done_count}")
+        logger.info(f"  Dry-run OK          : {dry_run_ok_count}")
+        logger.info(f"  Failed              : {failed}")
+        logger.info(f"  Skipped             : {skipped}")
+        logger.info("=" * 70)
 
     except Exception as e:
         logger.critical(f"Fatal error: {e}", exc_info=True)
