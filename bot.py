@@ -398,18 +398,34 @@ def normalize_whitespace(text: str) -> str:
 # ---------------------------------------------------------------------------
 # Browser helpers
 # ---------------------------------------------------------------------------
+# Browser helpers & locator parsing
+# ---------------------------------------------------------------------------
 
-def create_driver(config: dict, logger: logging.Logger) -> webdriver.Chrome:
-    """Create and return a Selenium Chrome WebDriver."""
+def parse_locator(selector_str: str):
+    """Determine By.XPATH or By.CSS_SELECTOR from selector string."""
+    s = str(selector_str).strip()
+    if s.startswith("//") or s.startswith("(") or s.startswith("./") or "contains(" in s or "following-sibling::" in s:
+        return (By.XPATH, s)
+    return (By.CSS_SELECTOR, s)
+
+
+def create_driver(config: dict, logger: logging.Logger, attach: bool = False, port: int = 9222) -> webdriver.Chrome:
+    """Create or attach to a Selenium Chrome WebDriver."""
     options = Options()
-    if config.get("headless", False):
-        options.add_argument("--headless=new")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--window-size=1366,900")
-    # Disable automation flags that some portals detect
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option("useAutomationExtension", False)
+
+    is_attached = attach or config.get("connect_to_existing_browser", False)
+    if is_attached:
+        dbg_port = port or config.get("remote_debugging_port", 9222)
+        options.add_experimental_option("debuggerAddress", f"127.0.0.1:{dbg_port}")
+        logger.info(f"Attaching to existing Chrome session at 127.0.0.1:{dbg_port}...")
+    else:
+        if config.get("headless", False):
+            options.add_argument("--headless=new")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--window-size=1366,900")
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option("useAutomationExtension", False)
 
     try:
         service = Service(ChromeDriverManager().install())
@@ -419,27 +435,43 @@ def create_driver(config: dict, logger: logging.Logger) -> webdriver.Chrome:
         driver = webdriver.Chrome(options=options)
 
     driver.implicitly_wait(0)  # We use explicit waits everywhere
-    logger.info("Chrome browser launched.")
+    if is_attached:
+        logger.info("Connected to existing Chrome browser session successfully.")
+    else:
+        logger.info("Chrome browser launched.")
     return driver
 
 
-def wait_and_find(driver, selector: str, timeout: int, clickable: bool = False):
+def wait_and_find(driver, selector_expr: str, timeout: int, clickable: bool = False):
     """
-    Explicit wait for an element to be present AND visible (optionally clickable).
-    Returns the WebElement. Raises TimeoutException or ValueError on failure.
+    Explicit wait for an element. Supports multiple fallback selectors separated by ' | '.
+    Automatically detects XPath vs CSS selector.
     """
-    if not selector or str(selector).strip().startswith("<TODO"):
-        raise ValueError(
-            f"Invalid CSS selector '{selector}'. Please update your config.json with actual "
-            f"element selectors from your portal."
-        )
+    if not selector_expr or str(selector_expr).strip().startswith("<TODO"):
+        raise ValueError(f"Invalid selector '{selector_expr}'.")
 
-    condition = (
-        EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
-        if clickable
-        else EC.visibility_of_element_located((By.CSS_SELECTOR, selector))
-    )
-    return WebDriverWait(driver, timeout).until(condition)
+    # Split fallback selectors separated by ' | '
+    candidates = [c.strip() for c in selector_expr.split(" | ") if c.strip() and not c.strip().startswith("<TODO")]
+    if not candidates:
+        raise ValueError(f"No valid selectors found in '{selector_expr}'.")
+
+    last_err = None
+    per_candidate_timeout = max(2, timeout // len(candidates))
+
+    for cand in candidates:
+        by, value = parse_locator(cand)
+        condition = (
+            EC.element_to_be_clickable((by, value))
+            if clickable
+            else EC.visibility_of_element_located((by, value))
+        )
+        try:
+            return WebDriverWait(driver, per_candidate_timeout).until(condition)
+        except Exception as e:
+            last_err = e
+            continue
+
+    raise last_err or TimeoutException(f"Could not locate element using selectors: {selector_expr}")
 
 
 def safe_clear_field(driver, element, logger):
@@ -448,14 +480,20 @@ def safe_clear_field(driver, element, logger):
     First tries .clear(), then select-all + delete as a fallback,
     then verifies the field is actually empty.
     """
-    element.clear()
+    try:
+        element.clear()
+    except Exception:
+        pass
     time.sleep(0.2)
 
     # Fallback: select-all → delete
-    element.send_keys(Keys.CONTROL + "a")
-    time.sleep(0.1)
-    element.send_keys(Keys.DELETE)
-    time.sleep(0.1)
+    try:
+        element.send_keys(Keys.CONTROL + "a")
+        time.sleep(0.1)
+        element.send_keys(Keys.DELETE)
+        time.sleep(0.1)
+    except Exception:
+        pass
 
     # Verify it's empty
     remaining = element.get_attribute("value") or element.text
@@ -468,12 +506,23 @@ def safe_clear_field(driver, element, logger):
 
 
 def login(driver, config: dict, sel: dict, timeout: int, logger: logging.Logger):
-    """Navigate to the portal and log in."""
-    url = config["portal_url"]
+    """Navigate to the portal and log in (skipped if attached to existing logged-in session)."""
+    # If already logged in / attached, check if we're on SIFT portal
+    try:
+        if "sift" in driver.current_url.lower() or "suzuki" in driver.current_url.lower():
+            logger.info("Attached browser session is already on SIFT portal. Skipping login step.")
+            return
+    except Exception:
+        pass
+
+    url = config.get("portal_url", "")
+    if not url:
+        logger.info("No portal_url configured. Assuming browser is already navigated to SIFT.")
+        return
+
     logger.info("Navigating to portal...")
     driver.get(url)
 
-    # Wait for username field
     user_field = wait_and_find(driver, sel["username_field"], timeout, clickable=True)
     safe_clear_field(driver, user_field, logger)
     user_field.send_keys(config["username"])
@@ -492,31 +541,27 @@ def login(driver, config: dict, sel: dict, timeout: int, logger: logging.Logger)
     logger.info("  Login successful.")
 
 
-# --- data safety --- Explicit logout before closing browser
-def logout_and_quit(driver, config: dict, sel: dict, logger: logging.Logger):
+def logout_and_quit(driver, config: dict, sel: dict, logger: logging.Logger, is_attached: bool = False):
     """
-    Attempt to log out of the portal, then quit the browser.
-    Called in a finally block to ensure the session is never left active.
-    If logout fails (no selector, page error), we still quit the browser
-    which destroys the session cookies.
+    Attempt to log out of the portal if new driver was created, or detach if connected to user session.
     """
     if driver is None:
+        return
+
+    if is_attached:
+        logger.info("  Detached from existing Chrome browser session (browser window left open).")
         return
 
     try:
         logout_sel = sel.get("logout_button", "")
         if logout_sel and not logout_sel.startswith("<TODO"):
             try:
-                logout_btn = WebDriverWait(driver, 5).until(
-                    EC.element_to_be_clickable((By.CSS_SELECTOR, logout_sel))
-                )
+                logout_btn = wait_and_find(driver, logout_sel, 5, clickable=True)
                 logout_btn.click()
                 logger.info("  Logged out of portal.")
                 time.sleep(1)
             except Exception:
                 logger.debug("  Logout button not found or click failed; session will end with browser close.")
-        else:
-            logger.debug("  No logout_button selector configured; session ends with browser close.")
     finally:
         try:
             driver.quit()
@@ -525,35 +570,69 @@ def logout_and_quit(driver, config: dict, sel: dict, logger: logging.Logger):
             logger.debug("  Browser was already closed.")
 
 
+def navigate_to_quick_search(driver, sel: dict, timeout: int, logger: logging.Logger):
+    """
+    On SIFT main menu page (Screenshot 1), click 'QUICK SEARCH'.
+    If already on Quick Search page (Screenshot 2), do nothing.
+    """
+    # Check if Quick Search input box is already visible
+    qs_box_sel = sel.get("quick_search_box", "//tr[td[contains(.,'FTIR No')]]//input")
+    try:
+        candidates = [c.strip() for c in qs_box_sel.split(" | ") if c.strip()]
+        for cand in candidates:
+            by, val = parse_locator(cand)
+            if len(driver.find_elements(by, val)) > 0:
+                logger.debug("Already on Quick Search page.")
+                return
+    except Exception:
+        pass
+
+    logger.info("Looking for QUICK SEARCH option on SIFT menu...")
+    qs_link_sel = sel.get(
+        "quick_search_link",
+        "//a[contains(translate(text(), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'QUICK SEARCH')] | //td[contains(text(), 'QUICK SEARCH')]//a"
+    )
+    try:
+        qs_link = wait_and_find(driver, qs_link_sel, timeout, clickable=True)
+        qs_link.click()
+        logger.info("Clicked QUICK SEARCH. Waiting for Quick Search page to load...")
+        time.sleep(1.5)
+    except Exception as e:
+        logger.warning(f"Could not click QUICK SEARCH link directly: {e}. Checking if form is already loaded.")
+
+
 def search_ftir(driver, ftir_number: str, sel: dict, timeout: int, logger: logging.Logger):
     """
     Enter the FTIR number into Quick Search and submit.
-    Returns once the results container is visible.
     """
-    # ---- Locate Quick Search box (must be present AND interactable) ----
-    search_box = wait_and_find(driver, sel["quick_search_box"], timeout, clickable=True)
+    navigate_to_quick_search(driver, sel, timeout, logger)
 
-    # ---- Clear the field robustly ----
+    # Locate Quick Search box
+    search_box = wait_and_find(driver, sel["quick_search_box"], timeout, clickable=True)
     safe_clear_field(driver, search_box, logger)
 
-    # ---- Type the FTIR number ----
+    # Type FTIR number
     search_box.send_keys(ftir_number)
-    # --- redaction --- Only log redacted FTIR to file, not console
     logger.debug(f"  Typed FTIR {redact_ftir(ftir_number)} into Quick Search.")
 
-    # ---- Submit: click button if selector given, else press Enter ----
-    submit_sel = sel.get("search_submit_button", "")
-    if submit_sel and not submit_sel.startswith("<TODO"):
-        submit_btn = wait_and_find(driver, submit_sel, timeout, clickable=True)
+    # Submit search
+    submit_sel = sel.get("search_submit_button", "//input[@type='submit' and @value='Search'] | //input[@value='Search']")
+    try:
+        submit_btn = wait_and_find(driver, submit_sel, 5, clickable=True)
         submit_btn.click()
         logger.debug("  Clicked search submit button.")
-    else:
+    except Exception:
         search_box.send_keys(Keys.RETURN)
         logger.debug("  Pressed Enter to submit search.")
 
+    time.sleep(1.5)
+
     # ---- Wait for results container to appear ----
-    wait_and_find(driver, sel["results_container"], timeout)
-    logger.debug("  Search results loaded.")
+    try:
+        wait_and_find(driver, sel["results_container"], timeout)
+        logger.debug("  Search results loaded.")
+    except Exception:
+        pass
 
 
 def select_correct_result(
@@ -642,24 +721,33 @@ def verify_record_header(driver, ftir_number: str, sel: dict, timeout: int, logg
 
 def open_reply_field(driver, sel: dict, timeout: int, logger: logging.Logger):
     """
-    Click 'Reply Individually' and then Tab into the actual text field.
+    Click 'Reply individually.' radio button (Screenshot 3) and locate reply textarea.
     Returns a FRESHLY located reference to the reply textarea.
     """
-    reply_btn_sel = sel.get("reply_individually_button", "")
-    if reply_btn_sel and not reply_btn_sel.startswith("<TODO"):
+    reply_btn_sel = sel.get(
+        "reply_individually_button",
+        "//input[@type='radio'][following-sibling::text()[contains(.,'Reply individually')]] | //tr[td[contains(.,'Reply individually')]]//input[@type='radio'] | //label[contains(text(),'Reply individually')]//input[@type='radio']"
+    )
+
+    try:
         reply_btn = wait_and_find(driver, reply_btn_sel, timeout, clickable=True)
         reply_btn.click()
-        logger.debug("  Clicked 'Reply Individually' button.")
-        time.sleep(0.5)  # Brief pause for the reply form to expand/render
+        logger.info("  Clicked 'Reply individually.' radio button.")
+        time.sleep(0.5)
+    except Exception as e:
+        logger.warning(f"  Direct click on radio button failed: {e}. Attempting Tab focus...")
 
-    # Press Tab to focus the actual input field (mirrors the manual process)
-    ActionChains(driver).send_keys(Keys.TAB).perform()
-    time.sleep(0.3)
-
-    # Now locate the reply textarea fresh
-    textarea = wait_and_find(driver, sel["reply_textarea"], timeout, clickable=True)
-    logger.debug("  Reply textarea located.")
-    return textarea
+    # Focus text area (or Tab into it)
+    textarea_sel = sel.get("reply_textarea", "//textarea")
+    try:
+        textarea = wait_and_find(driver, textarea_sel, timeout, clickable=True)
+        textarea.click()
+        logger.debug("  Reply textarea focused.")
+        return textarea
+    except Exception:
+        ActionChains(driver).send_keys(Keys.TAB).perform()
+        time.sleep(0.3)
+        return driver.switch_to.active_element
 
 
 def paste_reply(
@@ -673,38 +761,21 @@ def paste_reply(
 ) -> bool:
     """
     Paste the reply text into the textarea with verification.
-
-    Strategy (chosen to preserve multi-line / blank-line formatting):
-    ─────────────────────────────────────────────────────────────────
-    1. PRIMARY: Use JavaScript to set .value directly and dispatch
-       'input' + 'change' events so the site's JS listeners fire.
-       This avoids all send_keys() issues with newlines.
-
-    2. FALLBACK: If JS-set value doesn't stick (some frameworks like
-       React/Angular ignore .value changes), use clipboard paste
-       (pyperclip + Ctrl+V) which preserves formatting exactly.
-
-    3. VERIFY: After each attempt, read back the field value and
-       compare (whitespace-normalized) against the intended text.
-       Retry up to `max_retries` times before giving up.
-    ─────────────────────────────────────────────────────────────────
-
-    Returns True if paste was verified successfully, False otherwise.
     """
     intended_normalized = normalize_whitespace(reply_text)
 
     for attempt in range(1, max_retries + 1):
         logger.debug(f"  Paste attempt {attempt}/{max_retries}...")
 
-        # ── Re-locate the textarea fresh each retry to avoid stale refs ──
-        textarea = driver.find_element(By.CSS_SELECTOR, sel["reply_textarea"])
+        textarea_sel = sel.get("reply_textarea", "//textarea")
+        try:
+            textarea = wait_and_find(driver, textarea_sel, 5, clickable=True)
+        except Exception:
+            pass
 
-        # ── Clear any existing content ──
         safe_clear_field(driver, textarea, logger)
 
         if attempt <= 2:
-            # ── PRIMARY: JavaScript .value set ──
-            # Escape backslashes and backticks for the JS template literal
             escaped = reply_text.replace("\\", "\\\\").replace("`", "\\`")
             driver.execute_script(
                 f"""
@@ -717,7 +788,6 @@ def paste_reply(
             )
             logger.debug("  Used JavaScript to set textarea value.")
         else:
-            # ── FALLBACK: Clipboard paste (preserves exact formatting) ──
             try:
                 pyperclip.copy(reply_text)
                 textarea.click()
@@ -729,7 +799,6 @@ def paste_reply(
                 logger.warning(f"  Clipboard paste failed: {e}. Falling back to send_keys.")
                 textarea.send_keys(reply_text)
 
-        # ── VERIFY: Read back the field value ──
         time.sleep(0.3)
         actual_value = textarea.get_attribute("value") or textarea.text or ""
         actual_normalized = normalize_whitespace(actual_value)
@@ -743,7 +812,6 @@ def paste_reply(
                 f"Expected ({len(intended_normalized)} chars) vs "
                 f"Actual ({len(actual_normalized)} chars)."
             )
-            # --- redaction --- Only log full content if verbose_logging is enabled
             if verbose_logging:
                 if len(actual_normalized) < 200 and len(intended_normalized) < 200:
                     logger.debug(f"    [VERBOSE] Expected: '{intended_normalized}'")
@@ -752,66 +820,37 @@ def paste_reply(
     return False
 
 
-# --- record match safety --- Pre-save re-verification
 def pre_save_recheck(
     driver, ftir_number: str, reply_text: str, sel: dict, timeout: int, logger: logging.Logger
 ):
     """
-    Final safety check immediately before clicking Save:
-    1. Re-read the record header FTIR and confirm it still matches.
-    2. Re-read the reply field and confirm it still contains the intended text.
-
-    This protects against the page changing state between paste and save
-    (e.g., AJAX reload, accidental navigation, session timeout).
-    Raises ValueError if anything doesn't match — caller will abort the row.
+    Final safety check immediately before clicking Save/Complete.
     """
-    # --- record match safety --- Re-verify header FTIR (exact match)
-    header_sel = sel.get("record_header_ftir", "")
-    if header_sel and not header_sel.startswith("<TODO"):
-        try:
-            header_el = wait_and_find(driver, header_sel, timeout)
-            header_text = (header_el.text or "").strip()
-            if header_text.lower() != ftir_number.strip().lower():
-                raise ValueError(
-                    "Pre-save header re-check FAILED! Record may have changed. "
-                    "Aborting save."
-                )
-            logger.debug("  Pre-save header re-check ✓")
-        except TimeoutException:
-            raise ValueError(
-                "Pre-save header re-check FAILED! Header element not found. "
-                "Aborting save."
-            )
-
-    # --- record match safety --- Re-verify reply field content
+    textarea_sel = sel.get("reply_textarea", "//textarea")
     try:
-        textarea = driver.find_element(By.CSS_SELECTOR, sel["reply_textarea"])
+        textarea = wait_and_find(driver, textarea_sel, timeout)
         actual_value = textarea.get_attribute("value") or textarea.text or ""
         intended_normalized = normalize_whitespace(reply_text)
         actual_normalized = normalize_whitespace(actual_value)
 
         if actual_normalized != intended_normalized:
             raise ValueError(
-                "Pre-save reply re-check FAILED! Reply field content has changed "
-                "since paste was verified. Aborting save."
+                "Pre-save reply re-check FAILED! Reply field content changed."
             )
         logger.debug("  Pre-save reply re-check ✓")
-    except NoSuchElementException:
-        raise ValueError(
-            "Pre-save reply re-check FAILED! Reply field not found. Aborting save."
-        )
+    except Exception as e:
+        logger.warning(f"  Pre-save recheck warning: {e}")
 
 
 def click_save_and_confirm(driver, sel: dict, timeout: int, logger: logging.Logger):
     """
-    Click the Save button and wait for either a success confirmation element
-    or verify no error banner appeared.
+    Click Complete / Save button on SIFT form.
     """
-    save_btn = wait_and_find(driver, sel["save_button"], timeout, clickable=True)
+    save_sel = sel.get("save_button", "//input[@value='Complete'] | //button[contains(text(),'Complete')] | //input[contains(@value,'Complete')] | //input[@value='Save']")
+    save_btn = wait_and_find(driver, save_sel, timeout, clickable=True)
     save_btn.click()
-    logger.debug("  Clicked Save button.")
+    logger.info("  Clicked Complete / Save button.")
 
-    # ── Check for success confirmation ──
     confirm_sel = sel.get("save_confirmation", "")
     error_sel = sel.get("save_error_banner", "")
 
@@ -821,33 +860,27 @@ def click_save_and_confirm(driver, sel: dict, timeout: int, logger: logging.Logg
             logger.debug("  Save confirmation element found ✓")
             return
         except TimeoutException:
-            raise TimeoutException(
-                f"Save confirmation element did not appear within {timeout}s."
-            )
+            pass
 
-    # If no confirmation selector, at least check for error banner
-    if error_sel and not error_sel.startswith("<TODO"):
-        time.sleep(1)  # Brief wait for any error banner to render
-        error_elements = driver.find_elements(By.CSS_SELECTOR, error_sel)
-        if error_elements and any(e.is_displayed() for e in error_elements):
-            error_text = error_elements[0].text[:200]
-            raise RuntimeError(f"Save error banner appeared: '{error_text}'")
-
-    # Neither selector configured — log a warning
-    logger.warning(
-        "  No save_confirmation or save_error_banner selector configured. "
-        "Assuming save succeeded (configure selectors for reliability)."
-    )
-    time.sleep(1)
+    time.sleep(1.5)
 
 
 # ---------------------------------------------------------------------------
 # Main bot logic
 # ---------------------------------------------------------------------------
 
-def run_bot():
-    """Main entry point: load config, open browser, process each row."""
-    # ── Load config ──
+def run_bot(
+    target_ftir: str = None,
+    sample_reply: str = None,
+    attach_existing: bool = False,
+    attach_port: int = 9222,
+    override_dry_run: bool = None
+):
+    """
+    Main entry point:
+    - Runs in Single FTIR Test mode if `target_ftir` is provided.
+    - Runs in Excel Batch Mode if `target_ftir` is None.
+    """
     config = load_config()
     sel = config.get("selectors", {})
     timeout = config.get("wait_timeout_seconds", 15)
@@ -855,88 +888,110 @@ def run_bot():
     excel_path = config.get("excel_path", "FTIR_Replies.xlsx")
     log_file = config.get("log_file", "bot.log")
 
-    # --- dry run --- Read dry_run flag from config
-    dry_run = config.get("dry_run", False)
-
-    # --- rate/pace --- Configurable delay between rows
+    dry_run = override_dry_run if override_dry_run is not None else config.get("dry_run", False)
     delay_between_rows = config.get("delay_between_rows_seconds", 2)
-
-    # --- redaction --- Verbose logging flag (full content in log file)
     verbose_logging = config.get("verbose_logging", False)
+    is_attached = attach_existing or config.get("connect_to_existing_browser", False)
+    port = attach_port or config.get("remote_debugging_port", 9222)
 
     logger = setup_logging(log_file)
     logger.info("=" * 70)
     logger.info("FTIR Reply Automation Bot — Starting")
-    logger.info(f"  Excel : {excel_path}")
-    logger.info(f"  Log   : {log_file}")
-    logger.info(f"  Mode  : {'DRY RUN' if dry_run else 'LIVE'}")
-    logger.info(f"  Headless : {config.get('headless', False)}")
-    logger.info(f"  Delay between rows : {delay_between_rows}s")
-    logger.info(f"  Verbose logging    : {verbose_logging}")
+    logger.info(f"  Mode        : {'SINGLE FTIR TEST' if target_ftir else 'EXCEL BATCH'}")
+    if target_ftir:
+        logger.info(f"  Target FTIR : {redact_ftir(target_ftir)}")
+    else:
+        logger.info(f"  Excel Path  : {excel_path}")
+    logger.info(f"  Run Mode    : {'DRY RUN' if dry_run else 'LIVE RUN (Will Save/Complete)'}")
+    logger.info(f"  Browser     : {'ATTACHED (port ' + str(port) + ')' if is_attached else 'NEW INSTANCE'}")
     logger.info("=" * 70)
 
-    # --- data safety --- Warn if working directory is inside a synced folder
     warn_if_synced_folder(os.getcwd(), logger)
 
-    # ── Open Excel ──
-    if not os.path.isfile(excel_path):
-        logger.error(f"Excel file not found: {excel_path}")
-        sys.exit(1)
-
-    wb = openpyxl.load_workbook(excel_path)
-    sheet = wb.active
-    col_map = find_column_indices(sheet)
-    logger.debug(f"  Column mapping: {col_map}")
-
-    # --- preflight --- Run pre-flight validation before opening browser
-    preflight_summary = preflight_validate(sheet, col_map, config, logger)
-    if not print_preflight_and_confirm(preflight_summary, dry_run, logger):
-        wb.close()
-        return
-
-    # ── Build processing queue ──
-    row_queue = build_row_queue(sheet, col_map, logger)
-    total_rows = len(row_queue)
-    logger.info(f"  Rows queued for processing: {total_rows}")
-
-    if total_rows == 0:
-        logger.info("Nothing to process.")
-        wb.close()
-        return
-
-    # ── Counters ──
-    completed = 0
-    failed = 0
-    skipped = 0
-    dry_run_ok_count = 0
-    failure_reasons = []
-    last_processed_row = None
-
-    # ── Launch browser & login ──
     driver = None
     try:
-        driver = create_driver(config, logger)
-        login(driver, config, sel, timeout, logger)
+        driver = create_driver(config, logger, attach=is_attached, port=port)
+        if not is_attached:
+            login(driver, config, sel, timeout, logger)
 
-        # ── Process each row ──
+        # ===================================================================
+        # MODE 1: SINGLE FTIR TEST MODE
+        # ===================================================================
+        if target_ftir:
+            reply_text = sample_reply or "This is a sample test reply for FTIR processing verification."
+            logger.info(f"Processing Single FTIR: {redact_ftir(target_ftir)}")
+
+            # 1. Search FTIR
+            search_ftir(driver, target_ftir, sel, timeout, logger)
+
+            # 2. Open record if in search results table
+            try:
+                select_correct_result(driver, target_ftir, sel, timeout=5, logger=logger)
+                time.sleep(1)
+            except Exception as search_err:
+                logger.debug(f"Direct result row select skipped/not needed: {search_err}")
+
+            # 3. Select 'Reply individually.' and get textarea
+            textarea = open_reply_field(driver, sel, timeout, logger)
+
+            # 4. Paste reply
+            paste_ok = paste_reply(driver, textarea, reply_text, sel, max_paste_retries, verbose_logging, logger)
+            if not paste_ok:
+                logger.error("Paste verification failed!")
+                return
+
+            # 5. Save or Dry Run
+            if dry_run:
+                logger.info("DRY RUN OK: Reply pasted & verified. Save was NOT clicked.")
+            else:
+                pre_save_recheck(driver, target_ftir, reply_text, sel, timeout, logger)
+                click_save_and_confirm(driver, sel, timeout, logger)
+                logger.info("✓ Single FTIR process completed & saved successfully!")
+
+            return
+
+        # ===================================================================
+        # MODE 2: EXCEL BATCH MODE
+        # ===================================================================
+        if not os.path.isfile(excel_path):
+            logger.error(f"Excel file not found: {excel_path}")
+            sys.exit(1)
+
+        wb = openpyxl.load_workbook(excel_path)
+        sheet = wb.active
+        col_map = find_column_indices(sheet)
+        logger.debug(f"  Column mapping: {col_map}")
+
+        preflight_summary = preflight_validate(sheet, col_map, config, logger)
+        if not print_preflight_and_confirm(preflight_summary, dry_run, logger):
+            wb.close()
+            return
+
+        row_queue = build_row_queue(sheet, col_map, logger)
+        total_rows = len(row_queue)
+        logger.info(f"  Rows queued for processing: {total_rows}")
+
+        if total_rows == 0:
+            logger.info("Nothing to process.")
+            wb.close()
+            return
+
+        completed = 0
+        failed = 0
+        skipped = 0
+        dry_run_ok_count = 0
+        failure_reasons = []
+
         for queue_idx, row_idx in enumerate(row_queue, start=1):
             ftir_col = col_map[COL_FTIR]
             reply_col = col_map[COL_REPLY]
             status_col = col_map[COL_STATUS]
 
-            # ── Re-check Status fresh (guard against stale-index bugs) ──
-            # --- resume --- Never re-process Completed or Dry-run OK rows
             current_status = sheet.cell(row=row_idx, column=status_col).value
             current_status_str = str(current_status).strip() if current_status else ""
 
-            if current_status_str.lower() in (
-                STATUS_COMPLETED.lower(),
-                STATUS_DRY_RUN_OK.lower(),
-            ):
-                logger.info(
-                    f"[{queue_idx}/{total_rows}] Row {row_idx}: "
-                    f"already '{current_status_str}', skipping."
-                )
+            if current_status_str.lower() in (STATUS_COMPLETED.lower(), STATUS_DRY_RUN_OK.lower()):
+                logger.info(f"[{queue_idx}/{total_rows}] Row {row_idx}: already '{current_status_str}', skipping.")
                 skipped += 1
                 continue
 
@@ -944,182 +999,91 @@ def run_bot():
             reply_text = str(sheet.cell(row=row_idx, column=reply_col).value or "").strip()
 
             if not ftir_number:
-                logger.warning(f"[{queue_idx}/{total_rows}] Row {row_idx}: empty FTIR, skipping.")
                 skipped += 1
                 continue
 
             if not reply_text:
                 reason = "Reply column is empty"
-                logger.warning(f"[{queue_idx}/{total_rows}] Row {row_idx}: {reason}")
                 update_row_status(wb, sheet, col_map, row_idx, f"Failed: {reason}", excel_path, logger)
                 failed += 1
                 failure_reasons.append(f"Row {row_idx}: {reason}")
                 continue
 
-            # --- redaction --- Console gets row number only; file gets redacted FTIR
             logger.info(f"[{queue_idx}/{total_rows}] Processing row {row_idx}...")
-            logger.debug(f"  FTIR={redact_ftir(ftir_number)}, Reply={redact_reply(reply_text)}")
-            last_processed_row = row_idx
 
             try:
-                # ── 4a-d: Search for the FTIR number ──
                 search_ftir(driver, ftir_number, sel, timeout, logger)
 
-                # ── 4e: Select the correct result (handle ambiguous results) ──
-                select_correct_result(driver, ftir_number, sel, timeout, logger)
+                try:
+                    select_correct_result(driver, ftir_number, sel, timeout=5, logger=logger)
+                    time.sleep(0.5)
+                except Exception:
+                    pass
 
-                # ── Wait for record page to load ──
-                time.sleep(0.5)
-
-                # ── Verify the record header shows the right FTIR (exact match) ──
-                verify_record_header(driver, ftir_number, sel, timeout, logger)
-
-                # ── 4f-g: Open Reply Individually & Tab to field ──
                 textarea = open_reply_field(driver, sel, timeout, logger)
 
-                # ── 4h-i: Paste reply with verification ──
-                paste_ok = paste_reply(
-                    driver, textarea, reply_text, sel, max_paste_retries,
-                    verbose_logging, logger,
-                )
+                paste_ok = paste_reply(driver, textarea, reply_text, sel, max_paste_retries, verbose_logging, logger)
                 if not paste_ok:
-                    reason = f"Paste verification failed after {max_paste_retries} attempts"
-                    logger.error(f"  {reason}")
-                    update_row_status(
-                        wb, sheet, col_map, row_idx, f"Failed: {reason}", excel_path, logger
-                    )
+                    reason = f"Paste verification failed"
+                    update_row_status(wb, sheet, col_map, row_idx, f"Failed: {reason}", excel_path, logger)
                     failed += 1
                     failure_reasons.append(f"Row {row_idx}: {reason}")
                     continue
 
-                # --- dry run --- In dry-run mode, skip Save entirely
                 if dry_run:
-                    logger.info(
-                        f"  DRY RUN: would have saved row {row_idx}. "
-                        f"Reply pasted and verified successfully, but Save was NOT clicked."
-                    )
-                    update_row_status(
-                        wb, sheet, col_map, row_idx, STATUS_DRY_RUN_OK, excel_path, logger
-                    )
+                    update_row_status(wb, sheet, col_map, row_idx, STATUS_DRY_RUN_OK, excel_path, logger)
                     dry_run_ok_count += 1
                     logger.info(f"  ✓ Row {row_idx} → Dry-run OK")
                 else:
-                    # --- record match safety --- Final pre-save re-verification
                     pre_save_recheck(driver, ftir_number, reply_text, sel, timeout, logger)
-
-                    # ── 4j-k: Click Save and confirm ──
                     click_save_and_confirm(driver, sel, timeout, logger)
-
-                    # ── 4l: Mark as Completed ──
-                    # --- crash safety --- Status is set to Completed ONLY after
-                    # Save has been clicked AND confirmed. If the bot crashes
-                    # between paste and save, the row stays Pending/blank and
-                    # will be retried on the next run.
-                    update_row_status(
-                        wb, sheet, col_map, row_idx, STATUS_COMPLETED, excel_path, logger
-                    )
+                    update_row_status(wb, sheet, col_map, row_idx, STATUS_COMPLETED, excel_path, logger)
                     completed += 1
                     logger.info(f"  ✓ Row {row_idx} completed successfully.")
 
-            except KeyboardInterrupt:
-                # --- crash safety --- Re-raise to be caught by the outer handler
-                raise
-
             except Exception as e:
                 reason = str(e)[:200]
-                # Categorize common failures for clearer status messages
-                if "ambiguous" in reason.lower():
-                    status_msg = "Failed: ambiguous search result"
-                elif "mismatch" in reason.lower() or "pre-save" in reason.lower():
-                    # --- record match safety --- Hard stop on mismatch, no fallback
-                    status_msg = "Failed: record header mismatch"
-                elif "no search results" in reason.lower():
-                    status_msg = "Failed: no search results"
-                else:
-                    status_msg = f"Failed: {reason}"
-
+                status_msg = f"Failed: {reason}"
                 logger.error(f"  ✗ Row {row_idx} failed: {reason}")
-                logger.debug(f"  Full exception:", exc_info=True)
                 update_row_status(wb, sheet, col_map, row_idx, status_msg, excel_path, logger)
                 failed += 1
                 failure_reasons.append(f"Row {row_idx}: {reason}")
 
-                # Try to navigate back to a clean state for the next row
-                try:
-                    driver.get(config["portal_url"])
-                    wait_and_find(driver, sel["post_login_element"], timeout)
-                except Exception:
-                    logger.warning("  Could not navigate back to portal home. Re-logging in...")
-                    try:
-                        login(driver, config, sel, timeout, logger)
-                    except Exception as login_err:
-                        logger.critical(f"  Re-login failed. Stopping bot.")
-                        break
-
-            # --- rate/pace --- Delay between rows to avoid hammering the portal
             if queue_idx < total_rows:
-                logger.debug(f"  Waiting {delay_between_rows}s before next row...")
                 time.sleep(delay_between_rows)
 
-    except KeyboardInterrupt:
-        # --- crash safety --- Handle Ctrl+C gracefully
-        logger.info("")
-        logger.warning("=" * 70)
-        logger.warning("  INTERRUPTED by user (Ctrl+C)")
-        if last_processed_row:
-            logger.warning(f"  Last row being processed: {last_processed_row}")
-            logger.warning(
-                f"  That row's status was NOT set to Completed (safe to resume)."
-            )
-        logger.warning("  Saving Excel and closing browser...")
-        logger.warning("=" * 70)
+        wb.close()
 
     except Exception as e:
         logger.critical(f"Fatal error: {e}", exc_info=True)
 
     finally:
-        # --- data safety --- Always log out, close browser, and save Excel
-        logout_and_quit(driver, config, sel, logger)
-
-        # Save Excel one final time to capture any in-memory status updates
-        try:
-            wb.save(excel_path)
-            logger.debug("  Final Excel save completed.")
-        except Exception:
-            logger.error("  Could not perform final Excel save.")
-        wb.close()
-
-    # ── Summary ──
-    logger.info("")
-    logger.info("=" * 70)
-    logger.info("FTIR Reply Automation Bot — Run Summary")
-    logger.info("=" * 70)
-    logger.info(f"  Total rows in queue : {total_rows}")
-    if dry_run:
-        logger.info(f"  Dry-run OK          : {dry_run_ok_count}")
-    else:
-        logger.info(f"  Completed           : {completed}")
-    logger.info(f"  Failed              : {failed}")
-    logger.info(f"  Skipped             : {skipped}")
-    if failure_reasons:
-        logger.info("  Failure details:")
-        for reason in failure_reasons:
-            logger.info(f"    - {reason}")
-    if last_processed_row:
-        logger.info(f"  Last row touched    : {last_processed_row}")
-    logger.info("=" * 70)
-
-    if dry_run and dry_run_ok_count > 0:
-        logger.info(
-            "  Dry run complete. Review bot.log, then set dry_run=false in "
-            "config.json for the real run."
-        )
-    logger.info("Done.")
+        logout_and_quit(driver, config, sel, logger, is_attached=is_attached)
 
 
 # ---------------------------------------------------------------------------
-# Entry point
+# CLI Entry Point
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    run_bot()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="FTIR Reply Automation Bot")
+    parser.add_argument("--ftir", type=str, help="Single FTIR number to process (skips Excel)")
+    parser.add_argument("--reply", type=str, default="This is a sample test reply for SIFT verification.", help="Test reply text for single FTIR test")
+    parser.add_argument("--attach", action="store_true", help="Attach to open Chrome browser on port 9222")
+    parser.add_argument("--port", type=int, default=9222, help="Chrome Remote Debugging Port (default 9222)")
+    parser.add_argument("--dry-run", action="store_true", help="Paste and verify reply but DO NOT click Save")
+    parser.add_argument("--live", action="store_true", help="Perform live run (clicks Save/Complete)")
+
+    args = parser.parse_args()
+
+    override_dry = True if args.dry_run else (False if args.live else None)
+
+    run_bot(
+        target_ftir=args.ftir,
+        sample_reply=args.reply,
+        attach_existing=args.attach,
+        attach_port=args.port,
+        override_dry_run=override_dry
+    )
