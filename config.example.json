@@ -1,7 +1,7 @@
 {
     "_comment": "Configuration template for SIFT FTIR Reply Bot",
 
-    "portal_url": "https://sift.suzuki.co.in",
+    "portal_url": "https://sift.bizapps.suzuki/sift/",
     "username": "",
     "password": "",
 

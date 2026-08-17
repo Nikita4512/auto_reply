@@ -563,7 +563,7 @@ def login(driver, config: dict, sel: dict, timeout: int, logger: logging.Logger)
     except Exception:
         pass
 
-    url = config.get("portal_url", "https://sift.suzuki.co.in")
+    url = config.get("portal_url", "https://sift.bizapps.suzuki/sift/")
     logger.info(f"Navigating to SIFT portal: {url}...")
     try:
         driver.get(url)
@@ -577,7 +577,7 @@ def login(driver, config: dict, sel: dict, timeout: int, logger: logging.Logger)
     if not user or not pwd:
         logger.info("No credentials in config.json — waiting for user to log in via Edge window.")
         print("\n" + "=" * 70)
-        print("👉 Microsoft Edge has opened SIFT: https://sift.suzuki.co.in")
+        print("👉 Microsoft Edge has opened SIFT portal")
         print("👉 Please type your username & password in Edge and log in.")
         print("👉 Once you are logged in and see the SIFT Main Menu, press ENTER here...")
         print("=" * 70 + "\n")
@@ -643,13 +643,85 @@ def logout_and_quit(driver, config: dict, sel: dict, logger: logging.Logger, is_
             logger.debug("  Browser was already closed.")
 
 
+def switch_to_content_frame(driver, logger, search_text="QUICK SEARCH"):
+    """
+    Old enterprise Java apps (like SIFT) use HTML framesets.
+    This function tries to find the correct frame containing the target text.
+    It searches the main document first, then iterates through all frames/iframes.
+    """
+    # First check if content is in the default (top) document
+    driver.switch_to.default_content()
+    try:
+        if search_text.lower() in driver.page_source.lower():
+            logger.debug(f"  Found '{search_text}' in top-level document.")
+            return True
+    except Exception:
+        pass
+
+    # Try each frame/iframe
+    frames = driver.find_elements(By.TAG_NAME, "frame") + driver.find_elements(By.TAG_NAME, "iframe")
+    logger.debug(f"  Found {len(frames)} frame(s)/iframe(s) on page.")
+
+    for i, frame in enumerate(frames):
+        try:
+            frame_name = frame.get_attribute("name") or frame.get_attribute("id") or f"frame-{i}"
+            driver.switch_to.default_content()
+            driver.switch_to.frame(frame)
+            src = driver.page_source
+            if search_text.lower() in src.lower():
+                logger.info(f"  Switched to frame '{frame_name}' containing '{search_text}'.")
+                return True
+            logger.debug(f"  Frame '{frame_name}' does not contain '{search_text}'.")
+        except Exception as e:
+            logger.debug(f"  Could not check frame {i}: {e}")
+
+    # If no frame matched, go back to default and try anyway
+    driver.switch_to.default_content()
+    logger.debug(f"  No frame contained '{search_text}'. Staying on default content.")
+    return False
+
+
+def find_element_across_frames(driver, selector_expr, timeout, logger, clickable=False):
+    """
+    Try to find an element in the current frame first, then search all frames.
+    Returns the element if found, otherwise raises TimeoutException.
+    """
+    # Try current frame first
+    try:
+        return wait_and_find(driver, selector_expr, min(timeout, 3), clickable=clickable)
+    except Exception:
+        pass
+
+    # Search across all frames
+    driver.switch_to.default_content()
+    frames = driver.find_elements(By.TAG_NAME, "frame") + driver.find_elements(By.TAG_NAME, "iframe")
+
+    for i, frame in enumerate(frames):
+        try:
+            driver.switch_to.default_content()
+            driver.switch_to.frame(frame)
+            el = wait_and_find(driver, selector_expr, min(timeout, 3), clickable=clickable)
+            frame_name = frame.get_attribute("name") or frame.get_attribute("id") or f"frame-{i}"
+            logger.debug(f"  Found element in frame '{frame_name}'.")
+            return el
+        except Exception:
+            continue
+
+    # Last resort: switch back to default
+    driver.switch_to.default_content()
+    return wait_and_find(driver, selector_expr, timeout, clickable=clickable)
+
+
 def navigate_to_quick_search(driver, sel: dict, timeout: int, logger: logging.Logger):
     """
-    On SIFT main menu page (Screenshot 1), click 'QUICK SEARCH'.
-    If already on Quick Search page (Screenshot 2), do nothing.
+    On SIFT main menu page, click 'QUICK SEARCH'.
+    Handles HTML framesets used by the SIFT Java/JSP portal.
     """
-    # Check if Quick Search input box is already visible
-    qs_box_sel = sel.get("quick_search_box", "//tr[td[contains(.,'FTIR No')]]//input")
+    # Step 1: Try to find content across frames
+    switch_to_content_frame(driver, logger, "QUICK SEARCH")
+
+    # Step 2: Check if Quick Search input box is already visible
+    qs_box_sel = sel.get("quick_search_box", "//tr[td[contains(.,'FTIR No')]]//input | input[type='text']")
     try:
         candidates = [c.strip() for c in qs_box_sel.split(" | ") if c.strip()]
         for cand in candidates:
@@ -661,27 +733,72 @@ def navigate_to_quick_search(driver, sel: dict, timeout: int, logger: logging.Lo
         pass
 
     logger.info("Looking for QUICK SEARCH option on SIFT menu...")
-    qs_link_sel = sel.get(
-        "quick_search_link",
-        "//a[contains(translate(text(), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'QUICK SEARCH')] | //td[contains(text(), 'QUICK SEARCH')]//a"
-    )
-    try:
-        qs_link = wait_and_find(driver, qs_link_sel, timeout, clickable=True)
-        qs_link.click()
-        logger.info("Clicked QUICK SEARCH. Waiting for Quick Search page to load...")
-        time.sleep(1.5)
-    except Exception as e:
-        logger.warning(f"Could not click QUICK SEARCH link directly: {e}. Checking if form is already loaded.")
+
+    # Step 3: Try multiple ways to find and click QUICK SEARCH
+    qs_selectors = [
+        "//a[contains(text(), 'QUICK SEARCH')]",
+        "//a[contains(text(), 'Quick Search')]",
+        "//a[contains(text(), 'QUICK')]",
+        "//a[contains(translate(text(), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'QUICK SEARCH')]",
+        "//td[contains(text(), 'QUICK')]//a",
+        "a[href*='Quick']",
+        "a[href*='quick']",
+        "a[href*='QUICK']",
+    ]
+
+    clicked = False
+    for qs_sel in qs_selectors:
+        try:
+            el = find_element_across_frames(driver, qs_sel, 3, logger, clickable=True)
+            el.click()
+            logger.info(f"Clicked QUICK SEARCH link. Waiting for page to load...")
+            time.sleep(2)
+            clicked = True
+            break
+        except Exception:
+            continue
+
+    if not clicked:
+        # Last resort: try clicking via JavaScript on all links with matching text
+        try:
+            driver.switch_to.default_content()
+            frames = driver.find_elements(By.TAG_NAME, "frame") + driver.find_elements(By.TAG_NAME, "iframe")
+            for frame in frames:
+                try:
+                    driver.switch_to.default_content()
+                    driver.switch_to.frame(frame)
+                    links = driver.find_elements(By.TAG_NAME, "a")
+                    for link in links:
+                        txt = link.text.strip().upper()
+                        if "QUICK" in txt and "SEARCH" in txt:
+                            driver.execute_script("arguments[0].click();", link)
+                            logger.info("Clicked QUICK SEARCH via JS in frame.")
+                            time.sleep(2)
+                            clicked = True
+                            break
+                    if clicked:
+                        break
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    if not clicked:
+        logger.warning("Could not find QUICK SEARCH link. Will try to find the search form directly.")
 
 
 def search_ftir(driver, ftir_number: str, sel: dict, timeout: int, logger: logging.Logger):
     """
     Enter the FTIR number into Quick Search and submit.
+    Handles frames automatically.
     """
     navigate_to_quick_search(driver, sel, timeout, logger)
 
-    # Locate Quick Search box
-    search_box = wait_and_find(driver, sel["quick_search_box"], timeout, clickable=True)
+    # After clicking QUICK SEARCH, the page may have loaded in a new frame
+    switch_to_content_frame(driver, logger, "FTIR No")
+
+    # Locate Quick Search box — try across frames
+    search_box = find_element_across_frames(driver, sel["quick_search_box"], timeout, logger, clickable=True)
     safe_clear_field(driver, search_box, logger)
 
     # Type FTIR number
@@ -691,19 +808,19 @@ def search_ftir(driver, ftir_number: str, sel: dict, timeout: int, logger: loggi
     # Submit search
     submit_sel = sel.get("search_submit_button", "//input[@type='submit' and @value='Search'] | //input[@value='Search']")
     try:
-        submit_btn = wait_and_find(driver, submit_sel, 5, clickable=True)
+        submit_btn = find_element_across_frames(driver, submit_sel, 5, logger, clickable=True)
         submit_btn.click()
         logger.debug("  Clicked search submit button.")
     except Exception:
         search_box.send_keys(Keys.RETURN)
         logger.debug("  Pressed Enter to submit search.")
 
-    time.sleep(1.5)
+    time.sleep(2)
 
-    # ---- Wait for results container to appear ----
+    # ---- Wait for results / FTIR page to load ----
     try:
-        wait_and_find(driver, sel["results_container"], timeout)
-        logger.debug("  Search results loaded.")
+        switch_to_content_frame(driver, logger, ftir_number)
+        logger.debug("  Search results / FTIR page loaded.")
     except Exception:
         pass
 
@@ -803,7 +920,7 @@ def open_reply_field(driver, sel: dict, timeout: int, logger: logging.Logger):
     )
 
     try:
-        reply_btn = wait_and_find(driver, reply_btn_sel, timeout, clickable=True)
+        reply_btn = find_element_across_frames(driver, reply_btn_sel, timeout, logger, clickable=True)
         reply_btn.click()
         logger.info("  Clicked 'Reply individually.' radio button.")
         time.sleep(0.5)
@@ -813,7 +930,7 @@ def open_reply_field(driver, sel: dict, timeout: int, logger: logging.Logger):
     # Focus text area (or Tab into it)
     textarea_sel = sel.get("reply_textarea", "//textarea")
     try:
-        textarea = wait_and_find(driver, textarea_sel, timeout, clickable=True)
+        textarea = find_element_across_frames(driver, textarea_sel, timeout, logger, clickable=True)
         textarea.click()
         logger.debug("  Reply textarea focused.")
         return textarea
