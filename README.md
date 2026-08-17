@@ -4,49 +4,35 @@ Reads FTIR case numbers and pre-written replies from an Excel file (or single CL
 
 ---
 
-## ⚡ Quick Start (Company Laptop / Microsoft Edge)
+## ⚡ Quick Start (Single Command)
 
-If you are using **Microsoft Edge** or **Chrome** on a company laptop with SSO / Login:
-
-### Step 1: Install Dependencies
-```bash
+### Step 1: Install Dependencies (One-time)
+```cmd
 pip install -r requirements.txt
 ```
 
-### Step 2: Start Browser with Debugging Port Enabled
-1. **Close all open Microsoft Edge windows first**.
-2. Open **Command Prompt** (CMD) and start Edge on port 9222:
-   ```cmd
-   "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --remote-debugging-port=9222
-   ```
-   *(If Chrome is used: `"C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222`)*
-3. Log into the **SIFT Portal** in this browser and keep the **SIFT Main Menu** page open on screen.
+### Step 2: Run the Bot (1 Command)
 
-### Step 3: Run the Bot
+#### Option A: Test Single FTIR Number
+```cmd
+python bot.py --ftir AE20250B00111
+```
+* **What happens automatically:**
+  1. Microsoft Edge opens automatically to the SIFT portal.
+  2. Log into SIFT in the Edge window and press **ENTER** in your terminal.
+  3. The bot automatically navigates to **QUICK SEARCH**, enters `AE20250B00111`, selects **Reply individually.**, pastes the reply, and verifies it!
 
-#### Mode A: Test Single FTIR (e.g. `AE20250B00111`)
-
-- **Dry-Run Test** *(pastes and verifies reply without clicking Save)*:
+* If you want it to also click **Complete** (Save) automatically:
   ```cmd
-  python bot.py --ftir AE20250B00111 --attach --dry-run
+  python bot.py --ftir AE20250B00111 --reply "Your test reply message" --live
   ```
 
-- **Live Run** *(pastes reply and clicks **Complete** / Save)*:
-  ```cmd
-  python bot.py --ftir AE20250B00111 --reply "This is a sample reply message." --attach --live
-  ```
+---
 
-#### Mode B: Run Batch Mode from Excel (`FTIR_Replies.xlsx`)
-
-- **Dry-Run Batch**:
-  ```cmd
-  python bot.py --attach --dry-run
-  ```
-
-- **Live Batch**:
-  ```cmd
-  python bot.py --attach --live
-  ```
+#### Option B: Process Full Excel Sheet (`FTIR_Replies.xlsx`)
+```cmd
+python bot.py --live
+```
 
 ---
 

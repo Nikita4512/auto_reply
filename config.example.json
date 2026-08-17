@@ -5,7 +5,7 @@
     "username": "",
     "password": "",
 
-    "connect_to_existing_browser": true,
+    "connect_to_existing_browser": false,
     "remote_debugging_port": 9222,
 
     "excel_path": "FTIR_Replies.xlsx",
