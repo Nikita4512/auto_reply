@@ -618,15 +618,16 @@ def login(driver, config: dict, sel: dict, timeout: int, logger: logging.Logger)
             pass
 
 
-def logout_and_quit(driver, config: dict, sel: dict, logger: logging.Logger, is_attached: bool = False):
+def logout_and_quit(driver, config: dict, sel: dict, logger: logging.Logger, is_attached: bool = False, keep_open: bool = False):
     """
     Attempt to log out of the portal if new driver was created, or detach if connected to user session.
+    If keep_open is True, leaves the browser open without quitting.
     """
     if driver is None:
         return
 
-    if is_attached:
-        logger.info("  Detached from existing Chrome browser session (browser window left open).")
+    if is_attached or keep_open:
+        logger.info("  Browser window left open for inspection.")
         return
 
     try:
@@ -1251,7 +1252,7 @@ def run_bot(
         # MODE 1: SINGLE FTIR TEST MODE
         # ===================================================================
         if target_ftir:
-            reply_text = sample_reply or "This is a sample test reply for FTIR processing verification."
+            reply_text = sample_reply or "hii,this is teh reply"
             logger.info(f"Processing Single FTIR: {redact_ftir(target_ftir)}")
 
             try:
@@ -1287,6 +1288,15 @@ def run_bot(
 
             except AlreadyDoneError as ad:
                 logger.info(f"✓ Single FTIR {redact_ftir(target_ftir)}: {ad} (No overwrite needed).")
+
+            print("\n" + "=" * 70)
+            print("👉 Browser is paused so you can inspect the SIFT page.")
+            print("👉 Press ENTER when you are ready to exit and close the browser: ")
+            print("=" * 70 + "\n")
+            try:
+                input()
+            except (EOFError, KeyboardInterrupt):
+                pass
 
             return
 
@@ -1434,11 +1444,12 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="FTIR Reply Automation Bot")
     parser.add_argument("--ftir", type=str, help="Single FTIR number to process (skips Excel)")
-    parser.add_argument("--reply", type=str, default="This is a sample test reply for SIFT verification.", help="Test reply text for single FTIR test")
+    parser.add_argument("--reply", type=str, default="hii,this is teh reply", help="Test reply text for single FTIR test")
     parser.add_argument("--attach", action="store_true", help="Attach to open Chrome browser on port 9222")
     parser.add_argument("--port", type=int, default=9222, help="Chrome Remote Debugging Port (default 9222)")
     parser.add_argument("--dry-run", action="store_true", help="Paste and verify reply but DO NOT click Save")
     parser.add_argument("--live", action="store_true", help="Perform live run (clicks Save/Complete)")
+    parser.add_argument("--keep-open", action="store_true", help="Leave the browser open after script finishes")
 
     args = parser.parse_args()
 
