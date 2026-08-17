@@ -1,13 +1,59 @@
 # FTIR Reply Automation Bot
 
-Reads FTIR case numbers and pre-written replies from an Excel file, logs into a web portal, searches each FTIR, opens the correct record, pastes the reply, saves, and marks the row as Completed/Failed — with safeguards against every known failure mode.
+Reads FTIR case numbers and pre-written replies from an Excel file (or single CLI test mode), opens the SIFT tracking portal, searches each FTIR, selects "Reply individually.", pastes the reply, and saves the entry.
+
+---
+
+## ⚡ Quick Start (Company Laptop / Microsoft Edge)
+
+If you are using **Microsoft Edge** or **Chrome** on a company laptop with SSO / Login:
+
+### Step 1: Install Dependencies
+```bash
+pip install -r requirements.txt
+```
+
+### Step 2: Start Browser with Debugging Port Enabled
+1. **Close all open Microsoft Edge windows first**.
+2. Open **Command Prompt** (CMD) and start Edge on port 9222:
+   ```cmd
+   "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --remote-debugging-port=9222
+   ```
+   *(If Chrome is used: `"C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222`)*
+3. Log into the **SIFT Portal** in this browser and keep the **SIFT Main Menu** page open on screen.
+
+### Step 3: Run the Bot
+
+#### Mode A: Test Single FTIR (e.g. `AE20250B00111`)
+
+- **Dry-Run Test** *(pastes and verifies reply without clicking Save)*:
+  ```cmd
+  python bot.py --ftir AE20250B00111 --attach --dry-run
+  ```
+
+- **Live Run** *(pastes reply and clicks **Complete** / Save)*:
+  ```cmd
+  python bot.py --ftir AE20250B00111 --reply "This is a sample reply message." --attach --live
+  ```
+
+#### Mode B: Run Batch Mode from Excel (`FTIR_Replies.xlsx`)
+
+- **Dry-Run Batch**:
+  ```cmd
+  python bot.py --attach --dry-run
+  ```
+
+- **Live Batch**:
+  ```cmd
+  python bot.py --attach --live
+  ```
 
 ---
 
 ## Prerequisites
 
-- **Python 3.8+** (already on your laptop)
-- **Google Chrome** (any recent version — chromedriver is resolved automatically)
+- **Python 3.8+**
+- **Microsoft Edge** or **Google Chrome**
 - No admin rights required; no Docker, no databases, no heavy frameworks.
 
 ## Setup
