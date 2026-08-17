@@ -37,10 +37,9 @@
         "result_rows":              "table tr, div.result-row",
         "result_ftir_text":         "td:nth-child(1), a",
 
-        "record_header_ftir":       "body",
-        "reply_individually_button":"//input[@type='radio'][following-sibling::text()[contains(.,'Reply individually')]] | //tr[td[contains(.,'Reply individually')]]//input[@type='radio'] | //label[contains(text(),'Reply individually')]//input[@type='radio']",
-        "reply_textarea":           "//textarea | //tr[td[contains(.,'Reply individually')]]/following-sibling::tr//textarea | //td[contains(.,'Reply individually')]/following-sibling::td//textarea",
-        "save_button":              "//input[@value='Complete'] | //button[contains(text(),'Complete')] | //input[contains(@value,'Complete')] | //input[@value='Save']",
+        "reply_individually_button":"//tr[contains(., 'Reply individually')]//input[@type='radio'] | //input[@type='radio'][following-sibling::*[contains(.,'Reply individually')]] | //label[contains(text(),'Reply individually')]//input[@type='radio']",
+        "reply_textarea":           "//tr[contains(., 'Reply individually')]//textarea | //td[contains(., 'Reply individually')]/following-sibling::td//textarea | //div[@id='swFeedbackBlock']//tr[last()]//textarea",
+        "save_button":              "//div[@id='swFeedbackBlock']//input[@value='Complete'] | //input[@value='Complete'] | //button[contains(text(),'Complete')] | //input[@value='Save']",
 
         "save_confirmation":        "",
         "save_error_banner":        "",

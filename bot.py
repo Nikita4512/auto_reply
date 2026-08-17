@@ -976,8 +976,8 @@ def open_reply_field(driver, sel: dict, timeout: int, logger: logging.Logger):
     """
     On SIFT FTIR record page (SYQAA090):
     1. Navigate/expand the 'Individual Reply' / Feedback section (swFeedbackBlock)
-    2. Click 'Reply individually.' radio button
-    3. Locate and focus the reply textarea
+    2. Click 'Reply individually.' radio button in that specific table row
+    3. Locate and focus the reply textarea in that SAME table row
     """
     # Step 1: Ensure Individual Reply / Feedback section is visible
     try:
@@ -1004,72 +1004,97 @@ def open_reply_field(driver, sel: dict, timeout: int, logger: logging.Logger):
     except Exception:
         pass
 
-    # Step 2: Select 'Reply individually.' radio button
-    radio_clicked = False
-    reply_btn_sel = sel.get(
-        "reply_individually_button",
-        "//input[@type='radio'][following-sibling::*[contains(.,'Reply individually')]] | //label[contains(.,'Reply individually')]//input[@type='radio'] | //input[@type='radio']"
-    )
-
+    # Step 2: Try to locate and click 'Reply individually.' radio & find textarea via JavaScript directly in that exact row
     try:
-        reply_btn = wait_and_find(driver, reply_btn_sel, 5, clickable=True)
-        driver.execute_script("arguments[0].scrollIntoView(true);", reply_btn)
-        reply_btn.click()
-        logger.info("  Selected 'Reply individually.' radio button.")
-        radio_clicked = True
-        time.sleep(0.5)
-    except Exception as e:
-        logger.debug(f"  Direct radio click notice: {e}. Trying JS selection...")
-
-    if not radio_clicked:
-        # Fallback: search via JavaScript across all radio buttons on page
-        try:
-            clicked_via_js = driver.execute_script("""
-                var radios = document.querySelectorAll("input[type='radio']");
-                for (var i = 0; i < radios.length; i++) {
-                    var parent = radios[i].parentElement ? radios[i].parentElement.textContent : "";
-                    var row = radios[i].closest('tr') ? radios[i].closest('tr').textContent : "";
-                    if (parent.toLowerCase().indexOf("reply individually") !== -1 || row.toLowerCase().indexOf("reply individually") !== -1) {
-                        radios[i].checked = true;
-                        radios[i].click();
-                        radios[i].dispatchEvent(new Event('change', {bubbles: true}));
-                        return true;
+        js_result = driver.execute_script("""
+            var rows = document.querySelectorAll("tr");
+            for (var i = 0; i < rows.length; i++) {
+                var txt = rows[i].textContent.toLowerCase();
+                if (txt.indexOf("reply individually") !== -1 || (txt.indexOf("individually") !== -1 && txt.indexOf("reply") !== -1)) {
+                    var radio = rows[i].querySelector("input[type='radio']");
+                    if (radio) {
+                        radio.scrollIntoView(true);
+                        radio.checked = true;
+                        radio.click();
+                        radio.dispatchEvent(new Event('change', {bubbles: true}));
+                    }
+                    var ta = rows[i].querySelector("textarea");
+                    if (ta) {
+                        ta.scrollIntoView(true);
+                        ta.focus();
+                        return ta;
                     }
                 }
-                return false;
-            """)
-            if clicked_via_js:
-                logger.info("  Selected 'Reply individually.' radio via JS.")
-                radio_clicked = True
-                time.sleep(0.5)
-        except Exception:
-            pass
+            }
+            return null;
+        """)
+        if js_result:
+            logger.info("  Selected 'Reply individually.' radio and focused its row textarea via JS ✓")
+            return js_result
+    except Exception as e:
+        logger.debug(f"  JS row detection notice: {e}")
 
-    # Step 3: Locate and focus reply textarea
-    textarea_sel = sel.get("reply_textarea", "//div[@id='swFeedbackBlock']//textarea | //textarea[not(@readonly)] | //textarea")
-    textarea = None
-    try:
-        textarea = wait_and_find(driver, textarea_sel, timeout, clickable=True)
-        driver.execute_script("arguments[0].scrollIntoView(true);", textarea)
-        textarea.click()
-        logger.debug("  Reply textarea focused.")
-        return textarea
-    except Exception:
-        # Fallback: find any editable textarea inside Feedback block or anywhere on form
+    # Step 3: Fallback using specific XPath targeting ONLY the 'Reply individually' row
+    radio_clicked = False
+    reply_radio_xpaths = [
+        "//tr[contains(., 'Reply individually')]//input[@type='radio']",
+        "//tr[contains(., 'individually')]//input[@type='radio']",
+        "//td[contains(., 'Reply individually')]/preceding-sibling::td//input[@type='radio']",
+        "//td[contains(., 'Reply individually')]//input[@type='radio']",
+        "//label[contains(., 'Reply individually')]//input[@type='radio']"
+    ]
+
+    for rx in reply_radio_xpaths:
         try:
-            textareas = driver.find_elements(By.TAG_NAME, "textarea")
-            for ta in textareas:
-                if ta.is_displayed() and not ta.get_attribute("readonly"):
-                    driver.execute_script("arguments[0].scrollIntoView(true);", ta)
-                    ta.click()
-                    logger.debug("  Found editable textarea via fallback.")
-                    return ta
+            radio_el = driver.find_element(By.XPATH, rx)
+            driver.execute_script("arguments[0].scrollIntoView(true);", radio_el)
+            driver.execute_script("arguments[0].checked = true; arguments[0].click();", radio_el)
+            radio_el.click()
+            logger.info("  Selected 'Reply individually.' radio button.")
+            radio_clicked = True
+            time.sleep(0.5)
+            break
         except Exception:
-            pass
+            continue
 
-        ActionChains(driver).send_keys(Keys.TAB).perform()
-        time.sleep(0.3)
-        return driver.switch_to.active_element
+    # Step 4: Locate textarea in the 'Reply individually' row
+    textarea_xpaths = [
+        "//tr[contains(., 'Reply individually')]//textarea",
+        "//tr[contains(., 'individually')]//textarea",
+        "//td[contains(., 'Reply individually')]/following-sibling::td//textarea",
+        "//td[contains(., 'Reply individually')]/..//textarea",
+        "//tr[.//input[@type='radio'][..//text()[contains(., 'individually')]]]//textarea",
+        "//div[@id='swFeedbackBlock']//tr[last()]//textarea"
+    ]
+
+    for tx in textarea_xpaths:
+        try:
+            ta = driver.find_element(By.XPATH, tx)
+            if ta.is_displayed():
+                driver.execute_script("arguments[0].scrollIntoView(true);", ta)
+                ta.click()
+                logger.info("  Located 'Reply individually' textarea ✓")
+                return ta
+        except Exception:
+            continue
+
+    # Final fallback: find any visible textarea inside swFeedbackBlock
+    try:
+        feedback_block = driver.find_element(By.ID, "swFeedbackBlock")
+        tas = feedback_block.find_elements(By.TAG_NAME, "textarea")
+        if tas:
+            # The last textarea in FeedbackBlock is the 'Reply individually' textarea
+            target_ta = tas[-1]
+            driver.execute_script("arguments[0].scrollIntoView(true);", target_ta)
+            target_ta.click()
+            logger.info("  Located textarea in FeedbackBlock (last textarea).")
+            return target_ta
+    except Exception:
+        pass
+
+    ActionChains(driver).send_keys(Keys.TAB).perform()
+    time.sleep(0.3)
+    return driver.switch_to.active_element
 
 
 def paste_reply(
@@ -1089,7 +1114,7 @@ def paste_reply(
     for attempt in range(1, max_retries + 1):
         logger.debug(f"  Paste attempt {attempt}/{max_retries}...")
 
-        textarea_sel = sel.get("reply_textarea", "//div[@id='swFeedbackBlock']//textarea | //textarea")
+        textarea_sel = sel.get("reply_textarea", "//tr[contains(., 'Reply individually')]//textarea | //div[@id='swFeedbackBlock']//tr[last()]//textarea")
         try:
             textarea = wait_and_find(driver, textarea_sel, 5, clickable=True)
         except Exception:
@@ -1148,7 +1173,7 @@ def pre_save_recheck(
     """
     Final safety check immediately before clicking Save/Complete.
     """
-    textarea_sel = sel.get("reply_textarea", "//div[@id='swFeedbackBlock']//textarea | //textarea")
+    textarea_sel = sel.get("reply_textarea", "//tr[contains(., 'Reply individually')]//textarea | //div[@id='swFeedbackBlock']//tr[last()]//textarea")
     try:
         textarea = wait_and_find(driver, textarea_sel, timeout)
         actual_value = textarea.get_attribute("value") or textarea.text or ""
@@ -1269,10 +1294,7 @@ def run_bot(
                 # 3. Select 'Reply individually.' and get textarea
                 textarea = open_reply_field(driver, sel, timeout, logger)
 
-                # Check if response is already present in SIFT
-                check_existing_reply(driver, textarea, logger)
-
-                # 4. Paste reply
+                # 4. Paste reply into the 'Reply individually' textarea
                 paste_ok = paste_reply(driver, textarea, reply_text, sel, max_paste_retries, verbose_logging, logger)
                 if not paste_ok:
                     logger.error("Paste verification failed!")
@@ -1280,14 +1302,14 @@ def run_bot(
 
                 # 5. Save or Dry Run
                 if dry_run:
-                    logger.info("DRY RUN OK: Reply pasted & verified. Save was NOT clicked.")
+                    logger.info("DRY RUN OK: Reply pasted & verified in 'Reply individually' field. Save was NOT clicked.")
                 else:
                     pre_save_recheck(driver, target_ftir, reply_text, sel, timeout, logger)
                     click_save_and_confirm(driver, sel, timeout, logger)
                     logger.info("✓ Single FTIR process completed & saved successfully in SIFT!")
 
-            except AlreadyDoneError as ad:
-                logger.info(f"✓ Single FTIR {redact_ftir(target_ftir)}: {ad} (No overwrite needed).")
+            except Exception as err:
+                logger.error(f"Single FTIR processing error: {err}")
 
             print("\n" + "=" * 70)
             print("👉 Browser is paused so you can inspect the SIFT page.")
