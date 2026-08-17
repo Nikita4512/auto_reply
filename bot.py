@@ -25,8 +25,10 @@ from datetime import datetime
 import openpyxl
 import pyperclip
 from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options as ChromeOptions
+from selenium.webdriver.chrome.service import Service as ChromeService
+from selenium.webdriver.edge.options import Options as EdgeOptions
+from selenium.webdriver.edge.service import Service as EdgeService
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.action_chains import ActionChains
@@ -38,7 +40,15 @@ from selenium.common.exceptions import (
     StaleElementReferenceException,
     WebDriverException,
 )
-from webdriver_manager.chrome import ChromeDriverManager
+try:
+    from webdriver_manager.chrome import ChromeDriverManager
+except ImportError:
+    ChromeDriverManager = None
+
+try:
+    from webdriver_manager.microsoft import EdgeChromiumDriverManager
+except ImportError:
+    EdgeChromiumDriverManager = None
 
 # ---------------------------------------------------------------------------
 # Constants — Excel column names (change here if the real sheet differs)
@@ -409,36 +419,75 @@ def parse_locator(selector_str: str):
     return (By.CSS_SELECTOR, s)
 
 
-def create_driver(config: dict, logger: logging.Logger, attach: bool = False, port: int = 9222) -> webdriver.Chrome:
-    """Create or attach to a Selenium Chrome WebDriver."""
-    options = Options()
-
+def create_driver(config: dict, logger: logging.Logger, attach: bool = False, port: int = 9222):
+    """Create or attach to a Selenium Edge or Chrome WebDriver."""
     is_attached = attach or config.get("connect_to_existing_browser", False)
-    if is_attached:
-        dbg_port = port or config.get("remote_debugging_port", 9222)
-        options.add_experimental_option("debuggerAddress", f"127.0.0.1:{dbg_port}")
-        logger.info(f"Attaching to existing Chrome session at 127.0.0.1:{dbg_port}...")
-    else:
-        if config.get("headless", False):
-            options.add_argument("--headless=new")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--window-size=1366,900")
-        options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        options.add_experimental_option("useAutomationExtension", False)
+    dbg_port = port or config.get("remote_debugging_port", 9222)
 
+    # 1. If attaching to an already running browser (Edge or Chrome)
+    if is_attached:
+        logger.info(f"Attaching to existing browser session at 127.0.0.1:{dbg_port}...")
+        
+        # Try Edge WebDriver first
+        try:
+            edge_opts = EdgeOptions()
+            edge_opts.add_experimental_option("debuggerAddress", f"127.0.0.1:{dbg_port}")
+            driver = webdriver.Edge(options=edge_opts)
+            driver.implicitly_wait(0)
+            logger.info("Connected to existing Microsoft Edge browser session successfully.")
+            return driver
+        except Exception as edge_err:
+            logger.debug(f"Edge attach direct attempt: {edge_err}. Trying Chrome WebDriver...")
+
+        # Try Chrome WebDriver as fallback
+        try:
+            chrome_opts = ChromeOptions()
+            chrome_opts.add_experimental_option("debuggerAddress", f"127.0.0.1:{dbg_port}")
+            driver = webdriver.Chrome(options=chrome_opts)
+            driver.implicitly_wait(0)
+            logger.info("Connected to existing Chromium browser session successfully.")
+            return driver
+        except Exception as chrome_err:
+            raise RuntimeError(
+                f"Could not connect to browser on port {dbg_port}. "
+                f"Please ensure Microsoft Edge or Chrome was started with: "
+                f"msedge.exe --remote-debugging-port={dbg_port}"
+            ) from chrome_err
+
+    # 2. If launching a new browser instance
+    # Try Edge first
     try:
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=options)
+        edge_opts = EdgeOptions()
+        if config.get("headless", False):
+            edge_opts.add_argument("--headless=new")
+        edge_opts.add_argument("--no-sandbox")
+        edge_opts.add_argument("--disable-dev-shm-usage")
+        edge_opts.add_argument("--window-size=1366,900")
+        driver = webdriver.Edge(options=edge_opts)
+        driver.implicitly_wait(0)
+        logger.info("Microsoft Edge browser launched.")
+        return driver
     except Exception:
-        logger.warning("webdriver-manager failed to resolve chromedriver; falling back to PATH.")
-        driver = webdriver.Chrome(options=options)
+        pass
 
-    driver.implicitly_wait(0)  # We use explicit waits everywhere
-    if is_attached:
-        logger.info("Connected to existing Chrome browser session successfully.")
-    else:
-        logger.info("Chrome browser launched.")
+    # Fallback to Chrome
+    chrome_opts = ChromeOptions()
+    if config.get("headless", False):
+        chrome_opts.add_argument("--headless=new")
+    chrome_opts.add_argument("--no-sandbox")
+    chrome_opts.add_argument("--disable-dev-shm-usage")
+    chrome_opts.add_argument("--window-size=1366,900")
+    try:
+        if ChromeDriverManager:
+            service = ChromeService(ChromeDriverManager().install())
+            driver = webdriver.Chrome(service=service, options=chrome_opts)
+        else:
+            driver = webdriver.Chrome(options=chrome_opts)
+    except Exception:
+        driver = webdriver.Chrome(options=chrome_opts)
+
+    driver.implicitly_wait(0)
+    logger.info("Chrome browser launched.")
     return driver
 
 
