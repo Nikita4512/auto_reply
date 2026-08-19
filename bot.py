@@ -185,22 +185,43 @@ def warn_if_synced_folder(working_dir: str, logger: logging.Logger):
 def find_column_indices(sheet) -> dict:
     """
     Scan the header row (row 1) to find column indices for our expected columns.
-    Returns a dict like {"FTIR Number": 2, "Reply": 3, "Status": 4}.
-    Aborts if any required column is missing.
+    Returns a dict like {"FTIR Number": 1, "Reply": 2, "Status": 3}.
+    Supports flexible matching for FTIR, Reply, and Status columns.
     """
     headers = {}
     for col_idx in range(1, sheet.max_column + 1):
         val = sheet.cell(row=1, column=col_idx).value
-        if val:
+        if val is not None and str(val).strip():
             headers[str(val).strip()] = col_idx
 
-    missing = [c for c in (COL_FTIR, COL_REPLY, COL_STATUS) if c not in headers]
+    col_map = {}
+
+    for raw_header, idx in headers.items():
+        # Normalize: lowercase, remove punctuation, collapse whitespace
+        h_norm = re.sub(r"[^\w\s]", " ", raw_header.lower())
+        h_norm = re.sub(r"\s+", " ", h_norm).strip()
+
+        if "ftir" in h_norm and COL_FTIR not in col_map:
+            col_map[COL_FTIR] = idx
+        elif any(k in h_norm for k in ("reply", "replies", "response")) and COL_REPLY not in col_map:
+            col_map[COL_REPLY] = idx
+        elif any(k in h_norm for k in ("status", "state")) and COL_STATUS not in col_map:
+            col_map[COL_STATUS] = idx
+
+    missing = []
+    if COL_FTIR not in col_map:
+        missing.append(f"{COL_FTIR} (e.g., 'FTIR NO.')")
+    if COL_REPLY not in col_map:
+        missing.append(f"{COL_REPLY} (e.g., 'Individual Reply')")
+    if COL_STATUS not in col_map:
+        missing.append(f"{COL_STATUS}")
+
     if missing:
         raise ValueError(
             f"Excel is missing required column(s): {missing}. "
             f"Found headers: {list(headers.keys())}"
         )
-    return headers
+    return col_map
 
 
 def build_row_queue(sheet, col_map: dict, logger: logging.Logger) -> list:
