@@ -1258,7 +1258,7 @@ def pre_save_recheck(
 
 def click_save_and_confirm(driver, sel: dict, timeout: int, logger: logging.Logger):
     """
-    Click the Complete button (in Feedback block) or Save / Save & Close button (on toolbar).
+    Click the 'Save' button on the bottom toolbar as shown in the SIFT FTIR page.
     Automatically accepts any JavaScript confirm/alert dialogs.
     """
     # 1. Override browser confirmation/alert dialogs so they auto-accept
@@ -1275,82 +1275,75 @@ def click_save_and_confirm(driver, sel: dict, timeout: int, logger: logging.Logg
 
     clicked = False
 
-    # 2. Try clicking Complete or Save via JavaScript first
+    # 2. Locate and click the 'Save' button at the bottom toolbar via JavaScript
     try:
         js_click_save = """
-            var allButtons = document.querySelectorAll("input[type='submit'], input[type='button'], button, a.Button");
-            var completeBtn = null;
+            var allButtons = document.querySelectorAll("input[type='submit'], input[type='button'], button, a.Button, input");
             var saveBtn = null;
             var saveCloseBtn = null;
 
             for (var i = 0; i < allButtons.length; i++) {
                 var btn = allButtons[i];
                 var val = (btn.value || btn.innerText || btn.textContent || "").trim().toLowerCase();
-                var id = (btn.id || "").toLowerCase();
-                var onclick = (btn.getAttribute("onclick") || "").toLowerCase();
 
-                if (val === "complete" || id.indexOf("kanryo") !== -1 || onclick.indexOf("checkcomplete") !== -1) {
-                    completeBtn = btn;
+                // Exact match for "Save" button at the bottom toolbar
+                if (val === "save") {
+                    saveBtn = btn;
+                    break;
                 }
                 if (val === "save & close" || val === "save&close") {
                     saveCloseBtn = btn;
                 }
-                if (val === "save") {
-                    saveBtn = btn;
-                }
             }
 
-            var target = completeBtn || saveCloseBtn || saveBtn;
+            var target = saveBtn || saveCloseBtn;
             if (target) {
                 target.removeAttribute('disabled');
                 target.scrollIntoView({block: 'center'});
                 target.click();
-                return target.value || target.innerText || "Save/Complete";
+                return target.value || target.innerText || "Save";
             }
             return null;
         """
         btn_name = driver.execute_script(js_click_save)
         if btn_name:
-            logger.info(f"  Clicked '{btn_name}' button via JavaScript ✓")
+            logger.info(f"  Clicked '{btn_name}' button on bottom toolbar via JavaScript ✓")
             clicked = True
     except Exception as e:
-        logger.debug(f"  JS save button click notice: {e}")
+        logger.debug(f"  JS Save click notice: {e}")
 
-    # 3. Fallback: Click Complete or Save via XPath
+    # 3. Fallback: Click 'Save' button via XPath
     if not clicked:
         save_xpaths = [
-            "//div[@id='swFeedbackBlock']//input[@value='Complete']",
-            "//input[@value='Complete']",
-            "//input[contains(@value, 'Complete')]",
-            "//input[@value='Save & Close']",
             "//input[@value='Save']",
-            "//button[contains(text(), 'Complete')]",
-            "//button[contains(text(), 'Save')]",
-            "//a[contains(text(), 'Save')]"
+            "//button[normalize-space()='Save']",
+            "//a[normalize-space()='Save']",
+            "//input[@value='Save & Close']",
+            "//div[@id='swFeedbackBlock']//input[@value='Complete']"
         ]
         for sx in save_xpaths:
             try:
                 btn = driver.find_element(By.XPATH, sx)
-                driver.execute_script("arguments[0].scrollIntoView(true); arguments[0].removeAttribute('disabled'); arguments[0].click();", btn)
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center'}); arguments[0].removeAttribute('disabled');", btn)
                 btn.click()
-                logger.info("  Clicked Save/Complete button via XPath.")
+                logger.info("  Clicked 'Save' button via XPath.")
                 clicked = True
                 break
             except Exception:
                 continue
 
-    # 4. Handle browser alert dialog if one popped up
+    # 4. Handle browser alert popup if one appears
     time.sleep(1)
     try:
         alert = driver.switch_to.alert
         alert_text = alert.text
-        logger.info(f"  Browser alert popup accepted: '{alert_text}'")
+        logger.info(f"  Browser alert accepted: '{alert_text}'")
         alert.accept()
     except Exception:
         pass
 
     time.sleep(2)
-    logger.info("  ✓ Save/Complete submitted successfully in SIFT.")
+    logger.info("  ✓ FTIR record successfully saved in SIFT.")
 
 
 # ---------------------------------------------------------------------------
