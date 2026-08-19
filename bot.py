@@ -1009,8 +1009,9 @@ def open_reply_field(driver, sel: dict, timeout: int, logger: logging.Logger):
     """
     On SIFT FTIR record page (SYQAA090):
     1. Ensure Feedback / Individual Reply section (swFeedbackBlock) is expanded.
-    2. Specifically select the 3rd radio button ('Reply individually.') in the 3-row feedback table.
-    3. Specifically locate and activate the 3rd textarea on the far right of 'Reply individually.' / '[Final]'.
+    2. Click the 'Reply individually.' radio button.
+    3. Press TAB to navigate focus directly into the reply textarea beside [Final].
+    4. Returns the active focused textarea element.
     """
     # 1. Expand Feedback Block if collapsed or hidden
     try:
@@ -1027,118 +1028,101 @@ def open_reply_field(driver, sel: dict, timeout: int, logger: logging.Logger):
     except Exception:
         pass
 
-    # 2. Locate and click 'Reply individually.' radio button + find its corresponding 3rd textarea
-    textarea_el = None
+    # 2. Find and click 'Reply individually.' radio button (or its text label)
+    radio_clicked = False
     try:
-        js_find_and_select = """
-            var indivRadio = null;
-            var indivTextarea = null;
-            var targetTable = null;
+        # Search for the radio element or label
+        radio_elements = driver.find_elements(
+            By.XPATH,
+            "//tr[contains(., 'Reply individually') or contains(., 'individually')]//input[@type='radio'] | "
+            "//label[contains(., 'Reply individually') or contains(., 'individually')] | "
+            "//*[contains(text(), 'Reply individually')]"
+        )
+        for r_el in radio_elements:
+            try:
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", r_el)
+                time.sleep(0.2)
+                ActionChains(driver).move_to_element(r_el).click().perform()
+                logger.info("  Clicked 'Reply individually.' radio button via ActionChains ✓")
+                radio_clicked = True
+                break
+            except Exception:
+                try:
+                    r_el.click()
+                    radio_clicked = True
+                    break
+                except Exception:
+                    continue
+    except Exception as e:
+        logger.debug(f"  ActionChains radio click notice: {e}")
 
-            // Search all tables on page for the 3-row Feedback table
-            var allTables = document.querySelectorAll("table");
-            for (var t = 0; t < allTables.length; t++) {
-                var tbl = allTables[t];
-                var tblText = (tbl.innerText || tbl.textContent || "").toLowerCase();
-                if (tblText.includes("representative reply") && (tblText.includes("individually") || tblText.includes("reply individually"))) {
-                    targetTable = tbl;
-                    var radios = tbl.querySelectorAll("input[type='radio']");
-                    var textareas = tbl.querySelectorAll("textarea");
-                    
-                    // The 3rd radio button (index 2) is "Reply individually."
-                    if (radios.length >= 3) {
-                        indivRadio = radios[2];
-                    } else if (radios.length > 0) {
-                        indivRadio = radios[radios.length - 1];
-                    }
-
-                    // The 3rd textarea (index 2) is the last box beside "Reply individually." / "[Final]"
-                    if (textareas.length >= 3) {
-                        indivTextarea = textareas[2];
-                    } else if (textareas.length > 0) {
-                        indivTextarea = textareas[textareas.length - 1];
-                    }
+    # Also enforce checked state via JS if needed
+    try:
+        driver.execute_script("""
+            var radios = document.querySelectorAll("input[type='radio']");
+            for (var i = 0; i < radios.length; i++) {
+                var r = radios[i];
+                var txt = (r.parentElement ? r.parentElement.innerText : "") + " " + (r.closest("tr") ? r.closest("tr").innerText : "");
+                if (txt.toLowerCase().includes("individually")) {
+                    r.checked = true;
+                    r.dispatchEvent(new Event('change', {bubbles: true}));
+                    r.dispatchEvent(new Event('click', {bubbles: true}));
                     break;
                 }
             }
+        """)
+    except Exception:
+        pass
 
-            // Fallback: search specifically by radio button label/parent
-            if (!indivRadio || !indivTextarea) {
-                var allRadios = document.querySelectorAll("input[type='radio']");
-                for (var i = 0; i < allRadios.length; i++) {
-                    var r = allRadios[i];
-                    var parentTd = r.closest("td");
-                    var tdText = parentTd ? (parentTd.innerText || "").toLowerCase() : "";
-                    var label = r.parentElement ? (r.parentElement.innerText || "").toLowerCase() : "";
-                    
-                    if (tdText.includes("individually") || label.includes("individually")) {
-                        indivRadio = r;
-                        var row = r.closest("tr");
-                        if (row) {
-                            indivTextarea = row.querySelector("textarea");
-                        }
-                        break;
-                    }
-                }
-            }
+    time.sleep(0.3)
 
-            // Click the 'Reply individually.' radio button
-            if (indivRadio) {
-                indivRadio.scrollIntoView({block: 'center', inline: 'nearest'});
-                indivRadio.checked = true;
-                indivRadio.click();
-                indivRadio.dispatchEvent(new Event('change', {bubbles: true}));
-                indivRadio.dispatchEvent(new Event('click', {bubbles: true}));
-                indivRadio.dispatchEvent(new Event('input', {bubbles: true}));
-            }
-
-            // Clean up any text in row 1 or row 2 textareas if accidentally filled before
-            if (targetTable) {
-                var allTas = targetTable.querySelectorAll("textarea");
-                for (var k = 0; k < allTas.length; k++) {
-                    if (allTas[k] !== indivTextarea) {
-                        allTas[k].value = "";
-                    }
-                }
-            }
-
-            if (indivTextarea) {
-                indivTextarea.removeAttribute('disabled');
-                indivTextarea.removeAttribute('readonly');
-                indivTextarea.classList.remove('TEXT_READONLY');
-                indivTextarea.scrollIntoView({block: 'center', inline: 'nearest'});
-                indivTextarea.focus();
-                return indivTextarea;
-            }
-
-            return null;
-        """
-        textarea_el = driver.execute_script(js_find_and_select)
-        if textarea_el:
-            logger.info("  Selected 'Reply individually.' radio (Row 3) and focused its textarea beside [Final] ✓")
+    # 3. Press TAB to move focus directly into the textarea beside 'Reply individually.' / '[Final]'
+    try:
+        ActionChains(driver).send_keys(Keys.TAB).perform()
+        time.sleep(0.2)
+        active_el = driver.switch_to.active_element
+        if active_el and active_el.tag_name.lower() == "textarea":
+            logger.info("  Pressed TAB -> focused textarea beside 'Reply individually.' [Final] ✓")
+            return active_el
     except Exception as e:
-        logger.debug(f"  JS selection notice: {e}")
+        logger.debug(f"  TAB navigation notice: {e}")
 
-    # Fallback via XPath targeting strictly the row with 'individually'
-    if not textarea_el:
-        try:
-            r_el = driver.find_element(By.XPATH, "//tr[contains(., 'individually') or contains(., 'Individually')]//input[@type='radio']")
-            driver.execute_script("arguments[0].scrollIntoView(true); arguments[0].checked = true; arguments[0].click();", r_el)
-            r_el.click()
-            time.sleep(0.3)
-        except Exception:
-            pass
+    # 4. Fallback: Locate the 3rd textarea in the Feedback table directly
+    try:
+        js_target_ta = driver.execute_script("""
+            var allTables = document.querySelectorAll("table");
+            for (var t = 0; t < allTables.length; t++) {
+                var tbl = allTables[t];
+                var tblText = (tbl.innerText || "").toLowerCase();
+                if (tblText.includes("representative reply") && tblText.includes("individually")) {
+                    var tas = tbl.querySelectorAll("textarea");
+                    if (tas.length >= 3) {
+                        var targetTa = tas[2]; // 3rd textarea
+                        targetTa.removeAttribute('disabled');
+                        targetTa.removeAttribute('readonly');
+                        targetTa.classList.remove('TEXT_READONLY');
+                        targetTa.scrollIntoView({block: 'center'});
+                        targetTa.focus();
+                        return targetTa;
+                    } else if (tas.length > 0) {
+                        var targetTa = tas[tas.length - 1];
+                        targetTa.removeAttribute('disabled');
+                        targetTa.removeAttribute('readonly');
+                        targetTa.focus();
+                        return targetTa;
+                    }
+                }
+            }
+            return null;
+        """)
+        if js_target_ta:
+            logger.info("  Located and focused 3rd textarea beside [Final] via JS fallback ✓")
+            return js_target_ta
+    except Exception:
+        pass
 
-        try:
-            ta = driver.find_element(By.XPATH, "//tr[contains(., 'individually') or contains(., 'Individually')]//textarea")
-            driver.execute_script("arguments[0].scrollIntoView(true); arguments[0].removeAttribute('disabled'); arguments[0].removeAttribute('readonly');", ta)
-            ta.click()
-            textarea_el = ta
-            logger.info("  Located Row 3 textarea beside [Final] via XPath ✓")
-        except Exception:
-            pass
-
-    return textarea_el
+    # 5. Last fallback: return active element
+    return driver.switch_to.active_element
 
 
 def paste_reply(
@@ -1156,15 +1140,37 @@ def paste_reply(
     intended_normalized = normalize_whitespace(reply_text)
 
     for attempt in range(1, max_retries + 1):
-        logger.debug(f"  Writing reply text (attempt {attempt}/{max_retries})...")
+        logger.debug(f"  Writing reply text into individual box (attempt {attempt}/{max_retries})...")
 
-        # 1. Clear previous contents
+        # Make sure Row 1 (representative reply) is clean and not contaminated
+        try:
+            driver.execute_script("""
+                var allTables = document.querySelectorAll("table");
+                for (var t = 0; t < allTables.length; t++) {
+                    var tbl = allTables[t];
+                    var tblText = (tbl.innerText || "").toLowerCase();
+                    if (tblText.includes("representative reply") && tblText.includes("individually")) {
+                        var tas = tbl.querySelectorAll("textarea");
+                        if (tas.length >= 3) {
+                            // Row 1
+                            tas[0].value = '';
+                            // Row 2
+                            tas[1].value = '';
+                        }
+                    }
+                }
+            """)
+        except Exception:
+            pass
+
+        # 1. Clear target textarea
         try:
             driver.execute_script("""
                 var el = arguments[0];
                 if (el) {
                     el.removeAttribute('disabled');
                     el.removeAttribute('readonly');
+                    el.classList.remove('TEXT_READONLY');
                     el.value = '';
                     el.dispatchEvent(new Event('input', {bubbles: true}));
                     el.dispatchEvent(new Event('change', {bubbles: true}));
@@ -1173,7 +1179,7 @@ def paste_reply(
         except Exception:
             pass
 
-        # 2. Write new value using JavaScript
+        # 2. Write new value using JavaScript + Event dispatching
         try:
             driver.execute_script("""
                 var el = arguments[0];
@@ -1181,6 +1187,7 @@ def paste_reply(
                 if (el) {
                     el.removeAttribute('disabled');
                     el.removeAttribute('readonly');
+                    el.classList.remove('TEXT_READONLY');
                     el.focus();
                     el.value = val;
                     el.dispatchEvent(new Event('input', {bubbles: true}));
@@ -1193,19 +1200,7 @@ def paste_reply(
         except Exception as e:
             logger.debug(f"  JS text assignment notice: {e}")
 
-        # 3. Verify text in textarea
-        try:
-            actual_value = driver.execute_script("return arguments[0] ? (arguments[0].value || arguments[0].innerText || '') : '';", textarea)
-        except Exception:
-            actual_value = textarea.get_attribute("value") or textarea.text or ""
-
-        actual_normalized = normalize_whitespace(actual_value)
-
-        if actual_normalized == intended_normalized or intended_normalized in actual_normalized:
-            logger.info("  ✓ Reply text written and verified in 'Reply individually' box.")
-            return True
-
-        # Fallback: clipboard paste (Ctrl+V) or send_keys
+        # 3. Fallback with Clipboard (Ctrl+A -> Delete -> Ctrl+V) directly into element
         try:
             pyperclip.copy(reply_text)
             textarea.click()
@@ -1215,17 +1210,18 @@ def paste_reply(
             ActionChains(driver).key_down(Keys.CONTROL).send_keys("v").key_up(Keys.CONTROL).perform()
             time.sleep(0.3)
         except Exception:
-            try:
-                textarea.clear()
-                textarea.send_keys(reply_text)
-            except Exception:
-                pass
+            pass
 
-        actual_value = textarea.get_attribute("value") or textarea.text or ""
+        # 4. Verify text
+        try:
+            actual_value = driver.execute_script("return arguments[0] ? (arguments[0].value || arguments[0].innerText || '') : '';", textarea)
+        except Exception:
+            actual_value = textarea.get_attribute("value") or textarea.text or ""
+
         actual_normalized = normalize_whitespace(actual_value)
 
         if actual_normalized == intended_normalized or intended_normalized in actual_normalized:
-            logger.info("  ✓ Reply text written via fallback paste.")
+            logger.info("  ✓ Reply text written and verified in 'Reply individually' box.")
             return True
 
         logger.warning(
