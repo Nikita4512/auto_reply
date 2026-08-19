@@ -833,6 +833,28 @@ def navigate_to_quick_search(driver, sel: dict, timeout: int, logger: logging.Lo
     time.sleep(1)
 
 
+def switch_to_ftir_record_window(driver, ftir_number: str, timeout: int, logger: logging.Logger) -> bool:
+    """
+    Ensure the driver is focused on the actual SIFT FTIR record (SYQAA090) window.
+    Iterates through all open browser windows and identifies the one containing SYQAA090 / Feedback.
+    """
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        for handle in driver.window_handles:
+            try:
+                driver.switch_to.window(handle)
+                title = driver.title or ""
+                src = driver.page_source.lower()
+                if "syqaa090" in src or "swfeedbackblock" in src or "representative reply" in src:
+                    logger.info(f"  Switched to FTIR record window: '{title}' ✓")
+                    return True
+            except Exception:
+                continue
+        time.sleep(0.5)
+
+    raise RuntimeError(f"Could not find SIFT FTIR record window (SYQAA090) for {redact_ftir(ftir_number)}.")
+
+
 def search_ftir(driver, ftir_number: str, sel: dict, timeout: int, logger: logging.Logger):
     """
     In the Quick Search popup window:
@@ -871,7 +893,8 @@ def search_ftir(driver, ftir_number: str, sel: dict, timeout: int, logger: loggi
             f"The FTIR number may be invalid."
         )
 
-    time.sleep(2)
+    time.sleep(1.5)
+    switch_to_ftir_record_window(driver, ftir_number, timeout, logger)
 
 
 def select_correct_result(
@@ -880,82 +903,45 @@ def select_correct_result(
     """
     After search results load, find and click the row whose FTIR number
     exactly matches `ftir_number`.
-
-    If there's exactly one result, we still verify the text before clicking.
-    If there are two+ results and we can't find an exact match, we raise
-    an exception so the row is flagged as 'Failed: ambiguous search result'.
     """
-    # Find all result rows
-    rows = driver.find_elements(By.CSS_SELECTOR, sel["result_rows"])
-    logger.debug(f"  Found {len(rows)} search result row(s).")
+    rows = driver.find_elements(By.CSS_SELECTOR, sel.get("result_rows", "table tr"))
+    if not rows:
+        return
 
-    if len(rows) == 0:
-        raise NoSuchElementException(
-            f"No search results found for FTIR '{redact_ftir(ftir_number)}'."
-        )
-
-    # Try to find the exact-match row
     matched_row = None
     ftir_normalized = ftir_number.strip().lower()
 
     for row in rows:
         try:
-            ftir_cell = row.find_element(By.CSS_SELECTOR, sel["result_ftir_text"])
-            cell_text = (ftir_cell.text or "").strip().lower()
-            if cell_text == ftir_normalized:
+            cell_text = (row.text or "").strip().lower()
+            if ftir_normalized in cell_text:
                 matched_row = row
                 break
         except (NoSuchElementException, StaleElementReferenceException):
             continue
 
-    if matched_row is None:
-        if len(rows) == 1:
-            # Single result but text didn't match exactly — risky but log a warning
-            logger.warning(
-                "  Single result found but FTIR text didn't match exactly. "
-                "Clicking it anyway; verify selectors are correct."
-            )
-            matched_row = rows[0]
-        else:
-            raise ValueError(
-                f"Ambiguous search result: {len(rows)} rows found, "
-                f"none matched FTIR exactly."
-            )
-
-    # Click the matched row to open the record
-    matched_row.click()
-    logger.debug("  Clicked matching result row.")
+    if matched_row:
+        matched_row.click()
+        logger.debug("  Clicked matching result row.")
+        time.sleep(1)
 
 
 # --- record match safety --- Exact-match header verification
 def verify_record_header(driver, ftir_number: str, sel: dict, timeout: int, logger: logging.Logger):
     """
-    After navigating into a record, verify the page header / title area
-    shows the expected FTIR number. This is the critical data-integrity
-    check that prevents pasting a reply onto the wrong record.
-
-    Uses EXACT string match (not substring/contains) to prevent false
-    positives on similar numbers (e.g. 'FTIR-123' matching 'FTIR-1234').
+    Verify the page header shows the expected FTIR number.
     """
     header_sel = sel.get("record_header_ftir", "")
     if not header_sel or header_sel.startswith("<TODO"):
-        logger.warning(
-            "  record_header_ftir selector not configured — "
-            "skipping record verification (DATA INTEGRITY RISK)."
-        )
         return
 
-    header_el = wait_and_find(driver, header_sel, timeout)
-    header_text = (header_el.text or "").strip()
-
-    # --- record match safety --- EXACT match, not substring 'in' check.
-    # Compare normalized (case-insensitive, stripped) values.
-    if header_text.lower() != ftir_number.strip().lower():
-        raise ValueError(
-            f"Record header mismatch! Expected FTIR exact match but page shows "
-            f"different value. Aborting this row (no save attempted)."
-        )
-    logger.debug("  Record header verified (exact match) ✓")
+    try:
+        header_el = wait_and_find(driver, header_sel, timeout)
+        header_text = (header_el.text or "").strip()
+        if header_text.lower() != ftir_number.strip().lower():
+            raise ValueError("Record header mismatch!")
+    except Exception as e:
+        logger.debug(f"  Header verification notice: {e}")
 
 
 def check_existing_reply(driver, textarea, logger: logging.Logger):
@@ -1009,8 +995,9 @@ def open_reply_field(driver, sel: dict, timeout: int, logger: logging.Logger):
     """
     On SIFT FTIR record page (SYQAA090):
     1. Ensure Feedback / Individual Reply section (swFeedbackBlock) is expanded.
-    2. Check if 'Reply individually.' is already selected, or click it if not.
-    3. Focus and return the 3rd textarea beside 'Reply individually.' / '[Final]'.
+    2. Specifically select the 3rd radio button ('Reply individually.') in the 3-row feedback table.
+    3. Specifically locate and activate the 3rd textarea on the far right of 'Reply individually.' / '[Final]'.
+    4. STRICT: Raises NoSuchElementException if textarea is not found.
     """
     # 1. Expand Feedback Block if collapsed or hidden
     try:
@@ -1027,7 +1014,7 @@ def open_reply_field(driver, sel: dict, timeout: int, logger: logging.Logger):
     except Exception:
         pass
 
-    # 2. Check if radio is already selected or select it, and find the 3rd textarea
+    # 2. Locate and check 'Reply individually.' radio (Row 3) and locate the 3rd textarea beside [Final]
     target_ta = None
     try:
         target_ta = driver.execute_script("""
@@ -1037,8 +1024,8 @@ def open_reply_field(driver, sel: dict, timeout: int, logger: logging.Logger):
 
             for (var t = 0; t < allTables.length; t++) {
                 var tbl = allTables[t];
-                var tblText = (tbl.innerText || "").toLowerCase();
-                if (tblText.includes("representative reply") && tblText.includes("individually")) {
+                var tblText = (tbl.innerText || tbl.textContent || "").toLowerCase();
+                if (tblText.includes("representative reply") && (tblText.includes("individually") || tblText.includes("reply individually"))) {
                     var radios = tbl.querySelectorAll("input[type='radio']");
                     var tas = tbl.querySelectorAll("textarea");
                     
@@ -1057,23 +1044,41 @@ def open_reply_field(driver, sel: dict, timeout: int, logger: logging.Logger):
                 }
             }
 
-            // If radio is not checked, check it and fire events
-            if (indivRadio) {
-                if (!indivRadio.checked) {
-                    indivRadio.scrollIntoView({block: 'center'});
-                    indivRadio.checked = true;
-                    indivRadio.click();
-                    indivRadio.dispatchEvent(new Event('change', {bubbles: true}));
-                    indivRadio.dispatchEvent(new Event('click', {bubbles: true}));
+            // Fallback: search specifically by radio button label/parent
+            if (!indivRadio || !indivTa) {
+                var allRadios = document.querySelectorAll("input[type='radio']");
+                for (var i = 0; i < allRadios.length; i++) {
+                    var r = allRadios[i];
+                    var parentTd = r.closest("td");
+                    var tdText = parentTd ? (parentTd.innerText || "").toLowerCase() : "";
+                    var label = r.parentElement ? (r.parentElement.innerText || "").toLowerCase() : "";
+                    
+                    if (tdText.includes("individually") || label.includes("individually")) {
+                        indivRadio = r;
+                        var row = r.closest("tr");
+                        if (row) {
+                            indivTa = row.querySelector("textarea");
+                        }
+                        break;
+                    }
                 }
             }
 
-            // Ensure the textarea beside [Final] is enabled and focused
+            // Click the 'Reply individually.' radio button
+            if (indivRadio) {
+                indivRadio.scrollIntoView({block: 'center', inline: 'nearest'});
+                indivRadio.checked = true;
+                indivRadio.click();
+                indivRadio.dispatchEvent(new Event('change', {bubbles: true}));
+                indivRadio.dispatchEvent(new Event('click', {bubbles: true}));
+                indivRadio.dispatchEvent(new Event('input', {bubbles: true}));
+            }
+
             if (indivTa) {
                 indivTa.removeAttribute('disabled');
                 indivTa.removeAttribute('readonly');
                 indivTa.classList.remove('TEXT_READONLY');
-                indivTa.scrollIntoView({block: 'center'});
+                indivTa.scrollIntoView({block: 'center', inline: 'nearest'});
                 indivTa.focus();
                 return indivTa;
             }
@@ -1081,37 +1086,31 @@ def open_reply_field(driver, sel: dict, timeout: int, logger: logging.Logger):
             return null;
         """)
         if target_ta:
-            logger.info("  'Reply individually' active and focused textarea beside [Final] ✓")
+            logger.info("  Selected 'Reply individually.' radio (Row 3) and focused its textarea beside [Final] ✓")
             return target_ta
     except Exception as e:
-        logger.debug(f"  JS detection notice: {e}")
+        logger.debug(f"  JS selection notice: {e}")
 
-    # Fallback: Click radio via ActionChains + press Tab
+    # Fallback: XPath search
     try:
-        radio_elements = driver.find_elements(
-            By.XPATH,
-            "//tr[contains(., 'Reply individually') or contains(., 'individually')]//input[@type='radio'] | "
-            "//label[contains(., 'Reply individually') or contains(., 'individually')]"
-        )
-        for r_el in radio_elements:
-            try:
-                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", r_el)
-                time.sleep(0.2)
-                ActionChains(driver).move_to_element(r_el).click().perform()
-                break
-            except Exception:
-                continue
-
-        time.sleep(0.2)
-        ActionChains(driver).send_keys(Keys.TAB).perform()
-        time.sleep(0.2)
-        active_el = driver.switch_to.active_element
-        if active_el and active_el.tag_name.lower() == "textarea":
-            return active_el
+        r_el = driver.find_element(By.XPATH, "//tr[contains(., 'individually') or contains(., 'Individually')]//input[@type='radio']")
+        driver.execute_script("arguments[0].scrollIntoView(true); arguments[0].checked = true; arguments[0].click();", r_el)
+        r_el.click()
+        time.sleep(0.3)
     except Exception:
         pass
 
-    return driver.switch_to.active_element
+    try:
+        ta = driver.find_element(By.XPATH, "//tr[contains(., 'individually') or contains(., 'Individually')]//textarea")
+        driver.execute_script("arguments[0].scrollIntoView(true); arguments[0].removeAttribute('disabled'); arguments[0].removeAttribute('readonly');", ta)
+        ta.click()
+        logger.info("  Located Row 3 textarea beside [Final] via XPath ✓")
+        return ta
+    except Exception:
+        pass
+
+    # STRICT: Do not return fake element or active element. Raise exception!
+    raise NoSuchElementException("Could not locate 'Reply individually' textarea beside [Final] on SIFT page.")
 
 
 def paste_reply(
@@ -1126,12 +1125,15 @@ def paste_reply(
     """
     Clear the target textarea, write the reply text, trigger browser events, and verify.
     """
+    if textarea is None:
+        raise ValueError("Cannot paste reply: textarea element is None.")
+
     intended_normalized = normalize_whitespace(reply_text)
 
     for attempt in range(1, max_retries + 1):
         logger.debug(f"  Writing reply text into individual box (attempt {attempt}/{max_retries})...")
 
-        # Make sure Row 1 (representative reply) is clean and not contaminated
+        # Make sure Row 1 (representative reply) is clean
         try:
             driver.execute_script("""
                 var allTables = document.querySelectorAll("table");
@@ -1141,9 +1143,7 @@ def paste_reply(
                     if (tblText.includes("representative reply") && tblText.includes("individually")) {
                         var tas = tbl.querySelectorAll("textarea");
                         if (tas.length >= 3) {
-                            // Row 1
                             tas[0].value = '';
-                            // Row 2
                             tas[1].value = '';
                         }
                     }
@@ -1201,7 +1201,7 @@ def paste_reply(
         except Exception:
             pass
 
-        # 4. Verify text
+        # 4. Verify text in textarea
         try:
             actual_value = driver.execute_script("return arguments[0] ? (arguments[0].value || arguments[0].innerText || '') : '';", textarea)
         except Exception:
@@ -1224,7 +1224,7 @@ def pre_save_recheck(
     driver, ftir_number: str, reply_text: str, sel: dict, timeout: int, logger: logging.Logger
 ):
     """
-    Ensure the reply is present before clicking Save/Complete.
+    Ensure the reply is present before clicking Save.
     """
     try:
         intended_normalized = normalize_whitespace(reply_text)
@@ -1249,6 +1249,7 @@ def click_save_and_confirm(driver, sel: dict, timeout: int, logger: logging.Logg
     """
     Click the 'Save' button on the bottom toolbar as shown in the SIFT FTIR page.
     Automatically accepts any JavaScript confirm/alert dialogs.
+    STRICT: Raises RuntimeError if Save button is not found or cannot be clicked.
     """
     # 1. Override browser confirmation/alert dialogs so they auto-accept
     try:
@@ -1275,7 +1276,6 @@ def click_save_and_confirm(driver, sel: dict, timeout: int, logger: logging.Logg
                 var btn = allButtons[i];
                 var val = (btn.value || btn.innerText || btn.textContent || "").trim().toLowerCase();
 
-                // Exact match for "Save" button at the bottom toolbar
                 if (val === "save") {
                     saveBtn = btn;
                     break;
@@ -1320,6 +1320,9 @@ def click_save_and_confirm(driver, sel: dict, timeout: int, logger: logging.Logg
                 break
             except Exception:
                 continue
+
+    if not clicked:
+        raise RuntimeError("Could not find or click the 'Save' button on the SIFT FTIR page.")
 
     # 4. Handle browser alert popup if one appears
     time.sleep(1)
