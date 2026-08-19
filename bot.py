@@ -1009,9 +1009,8 @@ def open_reply_field(driver, sel: dict, timeout: int, logger: logging.Logger):
     """
     On SIFT FTIR record page (SYQAA090):
     1. Ensure Feedback / Individual Reply section (swFeedbackBlock) is expanded.
-    2. Click the 'Reply individually.' radio button.
-    3. Press TAB to navigate focus directly into the reply textarea beside [Final].
-    4. Returns the active focused textarea element.
+    2. Check if 'Reply individually.' is already selected, or click it if not.
+    3. Focus and return the 3rd textarea beside 'Reply individually.' / '[Final]'.
     """
     # 1. Expand Feedback Block if collapsed or hidden
     try:
@@ -1028,100 +1027,90 @@ def open_reply_field(driver, sel: dict, timeout: int, logger: logging.Logger):
     except Exception:
         pass
 
-    # 2. Find and click 'Reply individually.' radio button (or its text label)
-    radio_clicked = False
+    # 2. Check if radio is already selected or select it, and find the 3rd textarea
+    target_ta = None
     try:
-        # Search for the radio element or label
+        target_ta = driver.execute_script("""
+            var allTables = document.querySelectorAll("table");
+            var indivRadio = null;
+            var indivTa = null;
+
+            for (var t = 0; t < allTables.length; t++) {
+                var tbl = allTables[t];
+                var tblText = (tbl.innerText || "").toLowerCase();
+                if (tblText.includes("representative reply") && tblText.includes("individually")) {
+                    var radios = tbl.querySelectorAll("input[type='radio']");
+                    var tas = tbl.querySelectorAll("textarea");
+                    
+                    if (radios.length >= 3) {
+                        indivRadio = radios[2];
+                    } else if (radios.length > 0) {
+                        indivRadio = radios[radios.length - 1];
+                    }
+
+                    if (tas.length >= 3) {
+                        indivTa = tas[2];
+                    } else if (tas.length > 0) {
+                        indivTa = tas[tas.length - 1];
+                    }
+                    break;
+                }
+            }
+
+            // If radio is not checked, check it and fire events
+            if (indivRadio) {
+                if (!indivRadio.checked) {
+                    indivRadio.scrollIntoView({block: 'center'});
+                    indivRadio.checked = true;
+                    indivRadio.click();
+                    indivRadio.dispatchEvent(new Event('change', {bubbles: true}));
+                    indivRadio.dispatchEvent(new Event('click', {bubbles: true}));
+                }
+            }
+
+            // Ensure the textarea beside [Final] is enabled and focused
+            if (indivTa) {
+                indivTa.removeAttribute('disabled');
+                indivTa.removeAttribute('readonly');
+                indivTa.classList.remove('TEXT_READONLY');
+                indivTa.scrollIntoView({block: 'center'});
+                indivTa.focus();
+                return indivTa;
+            }
+
+            return null;
+        """)
+        if target_ta:
+            logger.info("  'Reply individually' active and focused textarea beside [Final] ✓")
+            return target_ta
+    except Exception as e:
+        logger.debug(f"  JS detection notice: {e}")
+
+    # Fallback: Click radio via ActionChains + press Tab
+    try:
         radio_elements = driver.find_elements(
             By.XPATH,
             "//tr[contains(., 'Reply individually') or contains(., 'individually')]//input[@type='radio'] | "
-            "//label[contains(., 'Reply individually') or contains(., 'individually')] | "
-            "//*[contains(text(), 'Reply individually')]"
+            "//label[contains(., 'Reply individually') or contains(., 'individually')]"
         )
         for r_el in radio_elements:
             try:
                 driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", r_el)
                 time.sleep(0.2)
                 ActionChains(driver).move_to_element(r_el).click().perform()
-                logger.info("  Clicked 'Reply individually.' radio button via ActionChains ✓")
-                radio_clicked = True
                 break
             except Exception:
-                try:
-                    r_el.click()
-                    radio_clicked = True
-                    break
-                except Exception:
-                    continue
-    except Exception as e:
-        logger.debug(f"  ActionChains radio click notice: {e}")
+                continue
 
-    # Also enforce checked state via JS if needed
-    try:
-        driver.execute_script("""
-            var radios = document.querySelectorAll("input[type='radio']");
-            for (var i = 0; i < radios.length; i++) {
-                var r = radios[i];
-                var txt = (r.parentElement ? r.parentElement.innerText : "") + " " + (r.closest("tr") ? r.closest("tr").innerText : "");
-                if (txt.toLowerCase().includes("individually")) {
-                    r.checked = true;
-                    r.dispatchEvent(new Event('change', {bubbles: true}));
-                    r.dispatchEvent(new Event('click', {bubbles: true}));
-                    break;
-                }
-            }
-        """)
-    except Exception:
-        pass
-
-    time.sleep(0.3)
-
-    # 3. Press TAB to move focus directly into the textarea beside 'Reply individually.' / '[Final]'
-    try:
+        time.sleep(0.2)
         ActionChains(driver).send_keys(Keys.TAB).perform()
         time.sleep(0.2)
         active_el = driver.switch_to.active_element
         if active_el and active_el.tag_name.lower() == "textarea":
-            logger.info("  Pressed TAB -> focused textarea beside 'Reply individually.' [Final] ✓")
             return active_el
-    except Exception as e:
-        logger.debug(f"  TAB navigation notice: {e}")
-
-    # 4. Fallback: Locate the 3rd textarea in the Feedback table directly
-    try:
-        js_target_ta = driver.execute_script("""
-            var allTables = document.querySelectorAll("table");
-            for (var t = 0; t < allTables.length; t++) {
-                var tbl = allTables[t];
-                var tblText = (tbl.innerText || "").toLowerCase();
-                if (tblText.includes("representative reply") && tblText.includes("individually")) {
-                    var tas = tbl.querySelectorAll("textarea");
-                    if (tas.length >= 3) {
-                        var targetTa = tas[2]; // 3rd textarea
-                        targetTa.removeAttribute('disabled');
-                        targetTa.removeAttribute('readonly');
-                        targetTa.classList.remove('TEXT_READONLY');
-                        targetTa.scrollIntoView({block: 'center'});
-                        targetTa.focus();
-                        return targetTa;
-                    } else if (tas.length > 0) {
-                        var targetTa = tas[tas.length - 1];
-                        targetTa.removeAttribute('disabled');
-                        targetTa.removeAttribute('readonly');
-                        targetTa.focus();
-                        return targetTa;
-                    }
-                }
-            }
-            return null;
-        """)
-        if js_target_ta:
-            logger.info("  Located and focused 3rd textarea beside [Final] via JS fallback ✓")
-            return js_target_ta
     except Exception:
         pass
 
-    # 5. Last fallback: return active element
     return driver.switch_to.active_element
 
 
