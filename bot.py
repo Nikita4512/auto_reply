@@ -986,11 +986,16 @@ def check_existing_reply(driver, textarea, logger: logging.Logger):
     except Exception:
         pass
 
-    # 2. Check if the reply textarea already contains text
+    # 2. Check if the reply textarea already contains an actual reply (ignoring SIFT's default watermark)
     if textarea:
         try:
             current_val = (textarea.get_attribute("value") or textarea.text or "").strip()
-            if current_val:
+            # SIFT puts a placeholder watermark in the textarea by default
+            is_placeholder = (
+                "please recheck if the contents of your reply" in current_val.lower()
+                or "suzuki's conclusion" in current_val.lower()
+            )
+            if current_val and not is_placeholder:
                 preview = current_val[:35].replace("\n", " ")
                 logger.info(f"  FTIR record already has a response written: '{preview}...' ({len(current_val)} chars).")
                 raise AlreadyDoneError(f"Response already written: '{preview}...'")
@@ -1004,8 +1009,8 @@ def open_reply_field(driver, sel: dict, timeout: int, logger: logging.Logger):
     """
     On SIFT FTIR record page (SYQAA090):
     1. Ensure Feedback / Individual Reply section (swFeedbackBlock) is expanded.
-    2. Select the 'Reply individually.' radio button (row 3 in the feedback table).
-    3. Locate and focus the reply textarea on the right side of 'Reply individually.'.
+    2. Specifically select the 3rd radio button ('Reply individually.') in the 3-row feedback table.
+    3. Specifically locate and activate the 3rd textarea on the far right of 'Reply individually.' / '[Final]'.
     """
     # 1. Expand Feedback Block if collapsed or hidden
     try:
@@ -1022,143 +1027,116 @@ def open_reply_field(driver, sel: dict, timeout: int, logger: logging.Logger):
     except Exception:
         pass
 
-    # 2. Locate and click 'Reply individually.' radio button + find its corresponding textarea
+    # 2. Locate and click 'Reply individually.' radio button + find its corresponding 3rd textarea
     textarea_el = None
     try:
         js_find_and_select = """
-            var result = {radioFound: false, radioClicked: false, textareaFound: false};
-            
-            // Search all table rows on the page for 'Reply individually' or 'individually'
-            var rows = document.querySelectorAll("tr");
-            var targetRow = null;
-            var targetRadio = null;
-            var targetTa = null;
+            var indivRadio = null;
+            var indivTextarea = null;
+            var targetTable = null;
 
-            for (var i = 0; i < rows.length; i++) {
-                var txt = (rows[i].innerText || rows[i].textContent || "").toLowerCase();
-                if (txt.indexOf("reply individually") !== -1 || (txt.indexOf("individually") !== -1 && txt.indexOf("reply") !== -1)) {
-                    targetRow = rows[i];
-                    targetRadio = rows[i].querySelector("input[type='radio']");
-                    targetTa = rows[i].querySelector("textarea");
+            // Search all tables on page for the 3-row Feedback table
+            var allTables = document.querySelectorAll("table");
+            for (var t = 0; t < allTables.length; t++) {
+                var tbl = allTables[t];
+                var tblText = (tbl.innerText || tbl.textContent || "").toLowerCase();
+                if (tblText.includes("representative reply") && (tblText.includes("individually") || tblText.includes("reply individually"))) {
+                    targetTable = tbl;
+                    var radios = tbl.querySelectorAll("input[type='radio']");
+                    var textareas = tbl.querySelectorAll("textarea");
+                    
+                    // The 3rd radio button (index 2) is "Reply individually."
+                    if (radios.length >= 3) {
+                        indivRadio = radios[2];
+                    } else if (radios.length > 0) {
+                        indivRadio = radios[radios.length - 1];
+                    }
+
+                    // The 3rd textarea (index 2) is the last box beside "Reply individually." / "[Final]"
+                    if (textareas.length >= 3) {
+                        indivTextarea = textareas[2];
+                    } else if (textareas.length > 0) {
+                        indivTextarea = textareas[textareas.length - 1];
+                    }
                     break;
                 }
             }
 
-            // Fallback: search all radio buttons if row text search didn't get the radio
-            if (!targetRadio) {
-                var radios = document.querySelectorAll("input[type='radio']");
-                for (var j = 0; j < radios.length; j++) {
-                    var r = radios[j];
-                    var pText = (r.parentElement ? r.parentElement.innerText : "").toLowerCase();
-                    var rText = (r.closest("tr") ? r.closest("tr").innerText : "").toLowerCase();
-                    if (pText.indexOf("individually") !== -1 || rText.indexOf("individually") !== -1) {
-                        targetRadio = r;
-                        if (!targetTa && r.closest("tr")) {
-                            targetTa = r.closest("tr").querySelector("textarea");
+            // Fallback: search specifically by radio button label/parent
+            if (!indivRadio || !indivTextarea) {
+                var allRadios = document.querySelectorAll("input[type='radio']");
+                for (var i = 0; i < allRadios.length; i++) {
+                    var r = allRadios[i];
+                    var parentTd = r.closest("td");
+                    var tdText = parentTd ? (parentTd.innerText || "").toLowerCase() : "";
+                    var label = r.parentElement ? (r.parentElement.innerText || "").toLowerCase() : "";
+                    
+                    if (tdText.includes("individually") || label.includes("individually")) {
+                        indivRadio = r;
+                        var row = r.closest("tr");
+                        if (row) {
+                            indivTextarea = row.querySelector("textarea");
                         }
                         break;
                     }
                 }
             }
 
-            // Fallback 3: check 3rd radio in feedback block
-            if (!targetRadio) {
-                var fb = document.getElementById("swFeedbackBlock");
-                if (fb) {
-                    var fbRadios = fb.querySelectorAll("input[type='radio']");
-                    if (fbRadios.length >= 3) {
-                        targetRadio = fbRadios[2]; // 3rd option is Reply individually
-                        targetTa = targetRadio.closest("tr") ? targetRadio.closest("tr").querySelector("textarea") : null;
+            // Click the 'Reply individually.' radio button
+            if (indivRadio) {
+                indivRadio.scrollIntoView({block: 'center', inline: 'nearest'});
+                indivRadio.checked = true;
+                indivRadio.click();
+                indivRadio.dispatchEvent(new Event('change', {bubbles: true}));
+                indivRadio.dispatchEvent(new Event('click', {bubbles: true}));
+                indivRadio.dispatchEvent(new Event('input', {bubbles: true}));
+            }
+
+            // Clean up any text in row 1 or row 2 textareas if accidentally filled before
+            if (targetTable) {
+                var allTas = targetTable.querySelectorAll("textarea");
+                for (var k = 0; k < allTas.length; k++) {
+                    if (allTas[k] !== indivTextarea) {
+                        allTas[k].value = "";
                     }
                 }
             }
 
-            // Click the radio button
-            if (targetRadio) {
-                result.radioFound = true;
-                targetRadio.scrollIntoView({block: 'center', inline: 'nearest'});
-                targetRadio.checked = true;
-                targetRadio.click();
-                targetRadio.dispatchEvent(new Event('change', {bubbles: true}));
-                targetRadio.dispatchEvent(new Event('click', {bubbles: true}));
-                targetRadio.dispatchEvent(new Event('input', {bubbles: true}));
-                result.radioClicked = true;
-            }
-
-            // Locate textarea
-            if (!targetTa && targetRadio && targetRadio.closest("tr")) {
-                targetTa = targetRadio.closest("tr").querySelector("textarea");
-            }
-            if (!targetTa) {
-                var allTas = document.querySelectorAll("textarea");
-                if (allTas.length > 0) {
-                    targetTa = allTas[allTas.length - 1]; // last textarea is reply individually box
-                }
-            }
-
-            if (targetTa) {
-                targetTa.removeAttribute('disabled');
-                targetTa.removeAttribute('readonly');
-                targetTa.classList.remove('TEXT_READONLY');
-                targetTa.scrollIntoView({block: 'center', inline: 'nearest'});
-                targetTa.focus();
-                return targetTa;
+            if (indivTextarea) {
+                indivTextarea.removeAttribute('disabled');
+                indivTextarea.removeAttribute('readonly');
+                indivTextarea.classList.remove('TEXT_READONLY');
+                indivTextarea.scrollIntoView({block: 'center', inline: 'nearest'});
+                indivTextarea.focus();
+                return indivTextarea;
             }
 
             return null;
         """
         textarea_el = driver.execute_script(js_find_and_select)
         if textarea_el:
-            logger.info("  Selected 'Reply individually.' radio and activated textarea via JS ✓")
+            logger.info("  Selected 'Reply individually.' radio (Row 3) and focused its textarea beside [Final] ✓")
     except Exception as e:
         logger.debug(f"  JS selection notice: {e}")
 
-    # Fallback via Selenium XPath if JS didn't return element
+    # Fallback via XPath targeting strictly the row with 'individually'
     if not textarea_el:
-        # Try clicking radio button via XPath
-        radio_xpaths = [
-            "//tr[contains(., 'Reply individually')]//input[@type='radio']",
-            "//tr[contains(., 'individually')]//input[@type='radio']",
-            "//td[contains(., 'Reply individually')]/preceding-sibling::td//input[@type='radio']",
-            "//label[contains(., 'Reply individually')]//input[@type='radio']",
-            "//div[@id='swFeedbackBlock']//tr[last()]//input[@type='radio']"
-        ]
-        for rx in radio_xpaths:
-            try:
-                r_el = driver.find_element(By.XPATH, rx)
-                driver.execute_script("arguments[0].scrollIntoView(true); arguments[0].checked = true; arguments[0].click();", r_el)
-                r_el.click()
-                logger.info("  Clicked 'Reply individually.' radio via XPath.")
-                time.sleep(0.3)
-                break
-            except Exception:
-                continue
+        try:
+            r_el = driver.find_element(By.XPATH, "//tr[contains(., 'individually') or contains(., 'Individually')]//input[@type='radio']")
+            driver.execute_script("arguments[0].scrollIntoView(true); arguments[0].checked = true; arguments[0].click();", r_el)
+            r_el.click()
+            time.sleep(0.3)
+        except Exception:
+            pass
 
-        # Try finding textarea via XPath
-        ta_xpaths = [
-            "//tr[contains(., 'Reply individually')]//textarea",
-            "//tr[contains(., 'individually')]//textarea",
-            "//td[contains(., 'Reply individually')]/following-sibling::td//textarea",
-            "//div[@id='swFeedbackBlock']//tr[last()]//textarea",
-            "//div[@id='swFeedbackBlock']//textarea[last()]"
-        ]
-        for tx in ta_xpaths:
-            try:
-                ta = driver.find_element(By.XPATH, tx)
-                driver.execute_script("arguments[0].scrollIntoView(true); arguments[0].removeAttribute('disabled'); arguments[0].removeAttribute('readonly');", ta)
-                ta.click()
-                textarea_el = ta
-                logger.info("  Located textarea via XPath ✓")
-                break
-            except Exception:
-                continue
-
-    if textarea_el is None:
-        # Ultimate fallback: return active element or any visible textarea
-        tas = driver.find_elements(By.TAG_NAME, "textarea")
-        if tas:
-            textarea_el = tas[-1]
-            driver.execute_script("arguments[0].scrollIntoView(true);", textarea_el)
+        try:
+            ta = driver.find_element(By.XPATH, "//tr[contains(., 'individually') or contains(., 'Individually')]//textarea")
+            driver.execute_script("arguments[0].scrollIntoView(true); arguments[0].removeAttribute('disabled'); arguments[0].removeAttribute('readonly');", ta)
+            ta.click()
+            textarea_el = ta
+            logger.info("  Located Row 3 textarea beside [Final] via XPath ✓")
+        except Exception:
+            pass
 
     return textarea_el
 
