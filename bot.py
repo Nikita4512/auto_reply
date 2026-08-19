@@ -1518,7 +1518,7 @@ def run_bot(
             current_status = sheet.cell(row=row_idx, column=status_col).value
             current_status_str = str(current_status).strip() if current_status else ""
 
-            if current_status_str.lower() in (STATUS_COMPLETED.lower(), STATUS_DRY_RUN_OK.lower(), STATUS_ALREADY_DONE.lower()):
+            if current_status_str.lower() in (STATUS_COMPLETED.lower(), STATUS_DRY_RUN_OK.lower(), STATUS_ALREADY_DONE.lower(), "already written"):
                 logger.info(f"[{queue_idx}/{total_rows}] Row {row_idx}: already '{current_status_str}', skipping.")
                 skipped += 1
                 continue
@@ -1550,6 +1550,9 @@ def run_bot(
 
                 textarea = open_reply_field(driver, sel, timeout, logger)
 
+                # Check if reply is already written / completed in SIFT
+                check_existing_reply(driver, textarea, logger)
+
                 paste_ok = paste_reply(driver, textarea, reply_text, sel, max_paste_retries, verbose_logging, logger)
                 if not paste_ok:
                     reason = "Paste verification failed"
@@ -1568,6 +1571,11 @@ def run_bot(
                     update_row_status(wb, sheet, col_map, row_idx, STATUS_COMPLETED, excel_path, logger)
                     completed += 1
                     logger.info(f"  ✓ Row {row_idx} → Completed (Saved in SIFT & Excel updated)")
+
+            except AlreadyDoneError as ad:
+                update_row_status(wb, sheet, col_map, row_idx, "Already Written", excel_path, logger)
+                already_done_count += 1
+                logger.info(f"  ✓ Row {row_idx} → Already Written (reply already exists in SIFT; Excel updated)")
 
             except Exception as e:
                 reason = str(e)[:200]
