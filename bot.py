@@ -586,8 +586,26 @@ def safe_clear_field(driver, element, logger):
         )
 
 
+def is_logged_in(driver) -> bool:
+    """Check if the user has successfully logged into the SIFT portal."""
+    try:
+        # Check for frames (SIFT main UI layout uses frames)
+        frames = driver.find_elements(By.TAG_NAME, "frame")
+        if len(frames) > 0:
+            return True
+        # Check if username input is no longer present and page has loaded
+        user_inputs = driver.find_elements(By.ID, "username")
+        if not user_inputs and ("sift" in driver.current_url.lower() or "bizapps" in driver.current_url.lower()):
+            body_text = driver.find_element(By.TAG_NAME, "body").text.lower()
+            if any(k in body_text for k in ("quick search", "main menu", "logout", "feedback", "ftir")):
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def login(driver, config: dict, sel: dict, timeout: int, logger: logging.Logger):
-    """Navigate to the SIFT portal and log in."""
+    """Navigate to the SIFT portal and log in (auto-detects login without manual ENTER)."""
     url = config.get("portal_url", "https://sift.bizapps.suzuki/sift/")
     logger.info(f"Navigating to SIFT portal: {url}...")
     try:
@@ -597,46 +615,35 @@ def login(driver, config: dict, sel: dict, timeout: int, logger: logging.Logger)
 
     time.sleep(2)
 
-    # Check if auto-login credentials are available
     user = config.get("username", "").strip()
     pwd = config.get("password", "").strip()
 
-    if not user or not pwd:
-        logger.info("No credentials in config.json — waiting for user to log in via Edge window.")
-        print("\n" + "=" * 70)
-        print("  Microsoft Edge has opened SIFT portal")
-        print("  Please type your username & password in Edge and log in.")
-        print("  Once you are logged in and see the SIFT Main Menu, press ENTER here...")
-        print("=" * 70 + "\n")
+    if user and pwd:
+        # Auto-fill credentials if provided in config.json
         try:
-            input("Press ENTER after logging into SIFT: ")
-        except (EOFError, KeyboardInterrupt):
-            pass
-        return
+            wait = WebDriverWait(driver, 5)
+            wait.until(EC.presence_of_element_located((By.ID, "username"))).send_keys(user)
+            logger.debug("  Entered username.")
+            wait.until(EC.presence_of_element_located((By.ID, "password"))).send_keys(pwd)
+            logger.debug("  Entered password.")
+            wait.until(EC.element_to_be_clickable((By.ID, "cal-login-button"))).click()
+            logger.info("  Credentials submitted automatically. Waiting for SIFT main menu...")
+        except Exception as e:
+            logger.warning(f"Auto credential entry skipped: {e}")
 
-    # Auto-login using exact SIFT element IDs
-    try:
-        wait = WebDriverWait(driver, timeout)
-        wait.until(EC.presence_of_element_located((By.ID, "username"))).send_keys(user)
-        logger.debug("  Entered username.")
+    # Auto-poll until user/browser is logged into SIFT (no ENTER needed)
+    logger.info("Waiting for SIFT login to complete (auto-detecting)...")
+    poll_start = time.time()
+    max_wait = 180  # wait up to 3 minutes for user login
 
-        wait.until(EC.presence_of_element_located((By.ID, "password"))).send_keys(pwd)
-        logger.debug("  Entered password.")
+    while time.time() - poll_start < max_wait:
+        if is_logged_in(driver):
+            logger.info("✓ Login detected! SIFT Main Menu ready. Starting bot processing...")
+            time.sleep(1.5)
+            return
+        time.sleep(1)
 
-        wait.until(EC.element_to_be_clickable((By.ID, "cal-login-button"))).click()
-        logger.info("  Clicked login button. Waiting for SIFT main menu...")
-
-        # Wait for frames to load (indicates main menu is ready)
-        time.sleep(3)
-        wait.until(EC.presence_of_all_elements_located((By.TAG_NAME, "frame")))
-        logger.info("  Login successful — SIFT main menu loaded.")
-    except Exception as e:
-        logger.warning(f"Automated login did not complete: {e}.")
-        print("\n  Please log into SIFT in the Edge window, then press ENTER here...")
-        try:
-            input("Press ENTER after logging in: ")
-        except (EOFError, KeyboardInterrupt):
-            pass
+    logger.warning("Auto-detect timeout reached. Proceeding with execution...")
 
 
 def logout_and_quit(driver, config: dict, sel: dict, logger: logging.Logger, is_attached: bool = False, keep_open: bool = False):
