@@ -836,7 +836,10 @@ def navigate_to_quick_search(driver, sel: dict, timeout: int, logger: logging.Lo
 def switch_to_ftir_record_window(driver, ftir_number: str, timeout: int, logger: logging.Logger) -> bool:
     """
     Ensure the driver is focused on the actual SIFT FTIR record (SYQAA090) window.
-    Iterates through all open browser windows and identifies the one containing SYQAA090 / Feedback.
+    Iterates through all open browser windows and identifies the one containing
+    the Reply section (visible text 'Reply individually' or 'representative reply').
+    Uses document.body.innerText (visible text) instead of page_source to avoid
+    false-positives from script/link references on SYQAA340 Quick Search pages.
     """
     start_time = time.time()
     while time.time() - start_time < timeout:
@@ -844,8 +847,13 @@ def switch_to_ftir_record_window(driver, ftir_number: str, timeout: int, logger:
             try:
                 driver.switch_to.window(handle)
                 title = driver.title or ""
-                src = driver.page_source.lower()
-                if "syqaa090" in src or "swfeedbackblock" in src or "representative reply" in src:
+                # Use visible page text to avoid matching SYQAA340 which has 'syqaa090' in script tags
+                visible_text = driver.execute_script(
+                    "return (document.body && document.body.innerText) ? document.body.innerText.toLowerCase() : '';"
+                ) or ""
+                if ("reply individually" in visible_text
+                        or "representative reply" in visible_text
+                        or "swfeedbackblock" in visible_text):
                     logger.info(f"  Switched to FTIR record window: '{title}' ✓")
                     return True
             except Exception:
@@ -894,7 +902,10 @@ def search_ftir(driver, ftir_number: str, sel: dict, timeout: int, logger: loggi
         )
 
     time.sleep(1.5)
-    switch_to_ftir_record_window(driver, ftir_number, timeout, logger)
+    # NOTE: Do NOT call switch_to_ftir_record_window here.
+    # At this point, we are on the SYQAA340 search results page.
+    # The FTIR record page (SYQAA090) only opens AFTER clicking a result row
+    # in select_correct_result(). The window switch happens there.
 
 
 def select_correct_result(
@@ -902,10 +913,17 @@ def select_correct_result(
 ):
     """
     After search results load, find and click the row whose FTIR number
-    exactly matches `ftir_number`.
+    exactly matches `ftir_number`. This opens the FTIR record page (SYQAA090)
+    in a new window. After clicking, switch to the new FTIR record window.
     """
+    # Record windows before clicking the result row
+    old_windows = set(driver.window_handles)
+
     rows = driver.find_elements(By.CSS_SELECTOR, sel.get("result_rows", "table tr"))
     if not rows:
+        # If no table rows found, SIFT may have opened the record directly
+        logger.debug("  No result rows found. SIFT may have opened the record directly.")
+        switch_to_ftir_record_window(driver, ftir_number, timeout, logger)
         return
 
     matched_row = None
@@ -922,8 +940,28 @@ def select_correct_result(
 
     if matched_row:
         matched_row.click()
-        logger.debug("  Clicked matching result row.")
+        logger.info("  Clicked matching result row. Waiting for FTIR record window...")
+        time.sleep(1.5)
+    else:
+        # No exact match found — try clicking the first row as fallback
+        logger.debug("  No exact match. Trying first result row as fallback...")
+        try:
+            rows[0].click()
+            time.sleep(1.5)
+        except Exception:
+            pass
+
+    # Check if a new window opened (SYQAA090 FTIR record page)
+    new_windows = set(driver.window_handles) - old_windows
+    if new_windows:
+        # A new window opened — switch to the latest one
+        new_window = list(new_windows)[-1]
+        driver.switch_to.window(new_window)
+        logger.info(f"  Switched to new window after clicking result row.")
         time.sleep(1)
+
+    # Now find and switch to the actual FTIR record window with Reply fields
+    switch_to_ftir_record_window(driver, ftir_number, timeout, logger)
 
 
 # --- record match safety --- Exact-match header verification
@@ -1398,12 +1436,8 @@ def run_bot(
                 # 1. Search FTIR
                 search_ftir(driver, target_ftir, sel, timeout, logger)
 
-                # 2. Open record if in search results table
-                try:
-                    select_correct_result(driver, target_ftir, sel, timeout=5, logger=logger)
-                    time.sleep(1)
-                except Exception as search_err:
-                    logger.debug(f"Direct result row select skipped/not needed: {search_err}")
+                # 2. Click the result row and switch to the FTIR record window (SYQAA090)
+                select_correct_result(driver, target_ftir, sel, timeout=10, logger=logger)
 
                 # 3. Select 'Reply individually.' and get textarea
                 textarea = open_reply_field(driver, sel, timeout, logger)
@@ -1501,11 +1535,8 @@ def run_bot(
             try:
                 search_ftir(driver, ftir_number, sel, timeout, logger)
 
-                try:
-                    select_correct_result(driver, ftir_number, sel, timeout=5, logger=logger)
-                    time.sleep(0.5)
-                except Exception:
-                    pass
+                # Click the result row and switch to the FTIR record window (SYQAA090)
+                select_correct_result(driver, ftir_number, sel, timeout=10, logger=logger)
 
                 textarea = open_reply_field(driver, sel, timeout, logger)
 
