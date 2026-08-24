@@ -1289,61 +1289,90 @@ def open_reply_field(driver, sel: dict, timeout: int, logger: logging.Logger):
 
     time.sleep(0.3)
 
-    # 3. Locate the EXACT textarea in the 'Reply individually.' row (beside [Final])
+    # 3. Locate the EXACT textarea beside [Final] in the 'Reply individually' row
+    # The page layout is:
+    #   Row: (●) Reply individually. | [Final] | [textarea] ← THIS IS THE TARGET
+    #   ...
+    #   Reply Currently Announced to Report Co. | [input]   ← NOT THIS ONE
     target_box = None
     try:
         js_find_ta = """
-            // STEP 1: Find the <tr> row that contains 'Reply individually' text
-            // This is the row BELOW 'Apply the representative reply with some modification'
+            // === METHOD 1: Find the [Final] label, then get the textarea next to it ===
+            var allElements = document.querySelectorAll("td, th, span, div, font, b, label");
+            for (var i = 0; i < allElements.length; i++) {
+                var el = allElements[i];
+                var t = (el.innerText || el.textContent || "").trim();
+                if (t === "[Final]" || t === "Final" || t.toLowerCase() === "[final]") {
+                    // Found [Final] label! Now find the textarea next to it.
+                    
+                    // Check: is there a textarea in the same <td> cell?
+                    var parentTd = el.closest("td");
+                    if (parentTd) {
+                        var ta = parentTd.querySelector("textarea");
+                        if (ta) return ta;
+                        
+                        // Check the NEXT sibling <td> cell
+                        var nextTd = parentTd.nextElementSibling;
+                        if (nextTd) {
+                            ta = nextTd.querySelector("textarea");
+                            if (ta) return ta;
+                        }
+                    }
+                    
+                    // Check the parent <tr> row
+                    var parentTr = el.closest("tr");
+                    if (parentTr) {
+                        var tas = parentTr.querySelectorAll("textarea");
+                        if (tas.length > 0) return tas[tas.length - 1];
+                    }
+                    
+                    break;  // [Final] found but no textarea beside it
+                }
+            }
+
+            // === METHOD 2: Find all rows, pick the one with BOTH radio + [Final] ===
             var allTrs = document.querySelectorAll("tr");
-            var individuallyRow = null;
-
-            for (var i = 0; i < allTrs.length; i++) {
-                var tr = allTrs[i];
-                var trTxt = (tr.innerText || tr.textContent || "").toLowerCase();
-                // Must contain 'reply individually' AND NOT be the representative reply row
-                if (trTxt.includes("reply individually") && !trTxt.includes("apply the representative")) {
-                    individuallyRow = tr;
-                    break;
-                }
-            }
-
-            // STEP 2: Get the last textarea inside that specific row
-            if (individuallyRow) {
-                var tas = individuallyRow.querySelectorAll("textarea, input[type='text']");
-                if (tas.length > 0) {
-                    return tas[tas.length - 1];
-                }
-            }
-
-            // STEP 3: Fallback - find [Final] label and get textarea in same row
             for (var j = 0; j < allTrs.length; j++) {
                 var tr = allTrs[j];
-                var trTxt = (tr.innerText || tr.textContent || "").toLowerCase();
-                if (trTxt.includes("[final]") && trTxt.includes("individually")) {
-                    var tas = tr.querySelectorAll("textarea, input[type='text']");
-                    if (tas.length > 0) {
-                        return tas[tas.length - 1];
-                    }
+                var trTxt = (tr.innerText || "").toLowerCase();
+                var hasRadio = tr.querySelector("input[type='radio']") !== null;
+                var hasFinal = trTxt.includes("[final]") || trTxt.includes("final");
+                var hasIndividually = trTxt.includes("individually");
+                
+                if (hasRadio && (hasFinal || hasIndividually)) {
+                    // This is the Reply individually row
+                    var tas = tr.querySelectorAll("textarea");
+                    if (tas.length > 0) return tas[tas.length - 1];
                 }
             }
 
-            // STEP 4: Last fallback - checked radio button is in 'reply individually' row
+            // === METHOD 3: Checked radio → same row's textarea ===
             var checkedRadio = document.querySelector("input[type='radio']:checked");
             if (checkedRadio) {
                 var row = checkedRadio.closest("tr");
                 if (row) {
-                    var tas = row.querySelectorAll("textarea, input[type='text']");
-                    if (tas.length > 0) {
-                        return tas[tas.length - 1];
-                    }
+                    var tas = row.querySelectorAll("textarea");
+                    if (tas.length > 0) return tas[tas.length - 1];
                 }
             }
 
             return null;
         """
         target_box = driver.execute_script(js_find_ta)
-        if target_box:
+    except Exception as e:
+        logger.debug(f"  JS box locate notice: {e}")
+
+    # Log what we found (for debugging)
+    if target_box:
+        try:
+            tag = driver.execute_script("return arguments[0].tagName;", target_box)
+            name = driver.execute_script("return arguments[0].name || arguments[0].id || 'unnamed';", target_box)
+            logger.info(f"  ✓ Found target element: <{tag}> name/id='{name}'")
+        except Exception:
+            pass
+
+        # Unlock, scroll to it, and click INTO it with a real mouse click
+        try:
             driver.execute_script("""
                 var el = arguments[0];
                 el.removeAttribute('disabled');
@@ -1352,29 +1381,39 @@ def open_reply_field(driver, sel: dict, timeout: int, logger: logging.Logger):
                 el.style.color = '#000000';
                 el.style.backgroundColor = '#ffffff';
                 el.scrollIntoView({block: 'center'});
-                el.focus();
             """, target_box)
-            logger.info("  ✓ Found and focused 'Reply individually' textarea beside '[Final]'.")
-            return target_box
-    except Exception as e:
-        logger.debug(f"  JS box locate notice: {e}")
+            time.sleep(0.2)
+            # Physical mouse click INTO the textarea
+            ActionChains(driver).move_to_element(target_box).click().perform()
+            time.sleep(0.2)
+        except Exception:
+            driver.execute_script("arguments[0].focus();", target_box)
 
-    # XPath fallback — specifically the 'Reply individually' row
+        logger.info("  ✓ Clicked into 'Reply individually' textarea beside '[Final]'.")
+        return target_box
+
+    # XPath fallback — find textarea in same row as [Final]
     try:
-        xpath_tas = driver.find_elements(
-            By.XPATH,
-            "//tr[.//input[@type='radio' and @checked] and contains(., 'individually')]//textarea | "
-            "//tr[contains(., 'Reply individually') and not(contains(., 'representative'))]//textarea"
-        )
-        if xpath_tas:
-            chosen = xpath_tas[-1]
-            driver.execute_script("arguments[0].scrollIntoView({block: 'center'}); arguments[0].focus();", chosen)
-            logger.info("  ✓ Found textarea via XPath fallback in Reply individually row.")
-            return chosen
+        xpath_options = [
+            "//td[contains(., '[Final]')]/following-sibling::td//textarea",
+            "//td[contains(., '[Final]')]//textarea",
+            "//tr[contains(., '[Final]')]//textarea",
+            "//tr[contains(., 'Reply individually')]//textarea",
+        ]
+        for xp in xpath_options:
+            tas = driver.find_elements(By.XPATH, xp)
+            if tas:
+                chosen = tas[-1]
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", chosen)
+                ActionChains(driver).move_to_element(chosen).click().perform()
+                logger.info(f"  ✓ Found textarea via XPath: {xp}")
+                return chosen
     except Exception:
         pass
 
-    return target_box or driver.switch_to.active_element
+    logger.warning("  ⚠ Could not locate [Final] textarea! Falling back to active element.")
+    return driver.switch_to.active_element
+
 
 
 
