@@ -1159,13 +1159,66 @@ def open_reply_field(driver, sel: dict, timeout: int, logger: logging.Logger):
     """
     On SIFT FTIR record page:
     1. Switch to the correct content frame.
-    2. Expand Feedback Block.
-    3. Select 'Reply individually.' radio button.
-    4. Return the exact Individual Reply textarea element.
+    2. Click the top Feedback logo/link/anchor to jump & scroll down to Feedback.
+    3. Expand Feedback Block (swFeedbackBlock).
+    4. Select 'Reply individually.' radio button.
+    5. Return the exact Individual Reply textarea element.
     """
     find_feedback_frame(driver, logger)
 
-    # 1. Expand Feedback Block if collapsed or hidden
+    # 1. Click top Feedback logo / anchor link / button to scroll down automatically
+    try:
+        js_click_feedback_logo = """
+            // 1. Try to find any top navigation link, logo, or button for FEEDBACK
+            var allLinks = document.querySelectorAll("a, input[type='button'], button, img, span, td");
+            for (var i = 0; i < allLinks.length; i++) {
+                var el = allLinks[i];
+                var txt = (el.innerText || el.textContent || el.alt || el.title || el.value || "").toLowerCase().trim();
+                var href = (el.href || el.getAttribute("onclick") || el.getAttribute("src") || "").toLowerCase();
+                
+                // Matches 'FEEDBACK' icon/link or 'swFeedbackBlock' anchor at the top
+                if (txt === "feedback" || txt === "go to feedback" || txt.includes("feedback") || href.includes("swfeedbackblock") || href.includes("feedback")) {
+                    // Make sure it's not the section header itself
+                    if (el.id !== "swFeedbackBlock") {
+                        el.click();
+                        break;
+                    }
+                }
+            }
+
+            // 2. Scroll the window down directly to the Feedback block
+            var fb = document.getElementById("swFeedbackBlock");
+            if (fb) {
+                fb.style.display = 'block';
+                fb.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            } else {
+                window.scrollTo({ top: document.body.scrollHeight / 2, behavior: 'smooth' });
+            }
+        """
+        driver.execute_script(js_click_feedback_logo)
+        time.sleep(0.4)
+    except Exception as e:
+        logger.debug(f"  Top logo/link scroll notice: {e}")
+
+    # Fallback: Click top Feedback link via XPath
+    try:
+        fb_top_links = driver.find_elements(
+            By.XPATH,
+            "//a[contains(translate(., 'FEEDBACK', 'feedback'), 'feedback')] | "
+            "//img[contains(@alt, 'Feedback') or contains(@src, 'feedback')] | "
+            "//a[contains(@href, 'Feedback') or contains(@href, 'swFeedbackBlock')]"
+        )
+        for fl in fb_top_links:
+            try:
+                fl.click()
+                time.sleep(0.3)
+                break
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    # 2. Expand Feedback Block if collapsed or hidden
     try:
         driver.execute_script("""
             if (typeof openArea === 'function') {
@@ -1174,6 +1227,7 @@ def open_reply_field(driver, sel: dict, timeout: int, logger: logging.Logger):
             var el = document.getElementById('swFeedbackBlock');
             if (el) {
                 el.style.display = 'block';
+                el.scrollIntoView({ block: 'center' });
             }
         """)
         time.sleep(0.3)
