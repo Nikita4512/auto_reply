@@ -1692,8 +1692,30 @@ def run_bot(
         # MODE 1: SINGLE FTIR TEST MODE
         # ===================================================================
         if target_ftir:
-            reply_text = sample_reply or "The customer concern was reviewed and resolved."
+            reply_text = sample_reply
+            # Automatically load reply from Excel for this specific FTIR
+            if not reply_text and os.path.isfile(excel_path):
+                try:
+                    wb_test = openpyxl.load_workbook(excel_path)
+                    sh_test = wb_test.active
+                    cmap_test = find_column_indices(sh_test)
+                    f_col = cmap_test[COL_FTIR]
+                    r_col = cmap_test[COL_REPLY]
+                    for row_i in range(2, sh_test.max_row + 1):
+                        f_v = str(sh_test.cell(row=row_i, column=f_col).value or "").strip()
+                        if f_v.lower() == target_ftir.strip().lower():
+                            reply_text = str(sh_test.cell(row=row_i, column=r_col).value or "").strip()
+                            logger.info(f"Loaded Excel reply for {target_ftir} (Row {row_i}) ✓")
+                            break
+                    wb_test.close()
+                except Exception as ex:
+                    logger.debug(f"Excel reply lookup notice: {ex}")
+
+            if not reply_text:
+                reply_text = "The customer concern was thoroughly reviewed by dealer team and necessary corrective action completed."
+
             logger.info(f"Processing Single FTIR: {redact_ftir(target_ftir)}")
+            logger.info(f"Reply text to write: {reply_text[:60]}...")
 
             try:
                 # 1. Search FTIR
