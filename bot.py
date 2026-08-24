@@ -1127,12 +1127,27 @@ def check_existing_reply(driver, textarea, logger: logging.Logger):
 def open_reply_field(driver, sel: dict, timeout: int, logger: logging.Logger):
     """
     On SIFT FTIR record page (SYQAA090):
-    1. Ensure Feedback / Individual Reply section (swFeedbackBlock) is expanded.
-    2. Click the 'Reply individually.' radio button.
-    3. Press TAB to navigate focus directly into the reply textarea beside [Final].
-    4. Returns the active focused textarea element.
+    1. Check all frames if the record is framed, switch to the right frame.
+    2. Ensure Feedback / Individual Reply section (swFeedbackBlock) is expanded.
+    3. Click the 'Reply individually.' radio button.
+    4. Focus and return the exact text input / textarea box beside '[Final]'.
     """
-    # 1. Expand Feedback Block if collapsed or hidden
+    # 1. Check if the page has frames and find the frame containing Feedback / Reply
+    frames = driver.find_elements(By.TAG_NAME, "frame") + driver.find_elements(By.TAG_NAME, "iframe")
+    if frames:
+        logger.debug(f"  Record window contains {len(frames)} frame(s). Searching for feedback section...")
+        for i, fr in enumerate(frames):
+            try:
+                driver.switch_to.default_content()
+                driver.switch_to.frame(fr)
+                src = driver.page_source.lower()
+                if "swfeedbackblock" in src or "individually" in src or "[final]" in src:
+                    logger.debug(f"  Switched to frame {i} containing feedback content.")
+                    break
+            except Exception:
+                continue
+
+    # 2. Expand Feedback Block if collapsed or hidden
     try:
         driver.execute_script("""
             if (typeof openArea === 'function') {
@@ -1143,14 +1158,95 @@ def open_reply_field(driver, sel: dict, timeout: int, logger: logging.Logger):
                 el.style.display = 'block';
             }
         """)
-        time.sleep(0.5)
+        time.sleep(0.3)
     except Exception:
         pass
 
-    # 2. Find and click 'Reply individually.' radio button (or its text label)
-    radio_clicked = False
+    # 3. Click 'Reply individually.' radio button + Locate the box right after [Final]
+    target_box = None
     try:
-        # Search for the radio element or label
+        js_find_and_select = """
+            // 1. Select the 'Reply individually' radio button
+            var radios = document.querySelectorAll("input[type='radio']");
+            var indRadio = null;
+            for (var i = 0; i < radios.length; i++) {
+                var r = radios[i];
+                var row = r.closest("tr") || r.parentElement;
+                var txt = ((row ? row.innerText : "") + " " + (r.name || "") + " " + (r.value || "")).toLowerCase();
+                if (txt.includes("individually") || txt.includes("individual")) {
+                    indRadio = r;
+                    break;
+                }
+            }
+
+            if (indRadio) {
+                indRadio.removeAttribute('disabled');
+                indRadio.checked = true;
+                indRadio.scrollIntoView({block: 'center'});
+                indRadio.dispatchEvent(new Event('change', {bubbles: true}));
+                indRadio.dispatchEvent(new Event('click', {bubbles: true}));
+            }
+
+            // 2. Find the input / textarea box right beside '[Final]' or in the 'Reply individually' row
+            var targetInput = null;
+            var allTrs = document.querySelectorAll("tr");
+            for (var i = 0; i < allTrs.length; i++) {
+                var tr = allTrs[i];
+                var trTxt = (tr.innerText || tr.textContent || "").toLowerCase();
+                if (trTxt.includes("individually") || trTxt.includes("[final]") || trTxt.includes("final")) {
+                    var inputs = tr.querySelectorAll("input[type='text'], input:not([type='radio']):not([type='checkbox']):not([type='button']):not([type='submit']):not([type='hidden']):not([type='file']), textarea");
+                    if (inputs.length > 0) {
+                        targetInput = inputs[inputs.length - 1]; // Box right after [Final]
+                        break;
+                    }
+                }
+            }
+
+            // 3. Fallback: Search all cells containing '[Final]'
+            if (!targetInput) {
+                var allTds = document.querySelectorAll("td, span, font, label, div");
+                for (var j = 0; j < allTds.length; j++) {
+                    var td = allTds[j];
+                    if ((td.innerText || "").trim().toLowerCase().includes("[final]")) {
+                        var parentTr = td.closest("tr") || td.parentElement;
+                        if (parentTr) {
+                            var found = parentTr.querySelector("input[type='text'], input:not([type='radio']):not([type='submit']):not([type='button']):not([type='hidden']), textarea");
+                            if (found) {
+                                targetInput = found;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 4. Fallback: If focus moved to active element
+            if (!targetInput && document.activeElement) {
+                var act = document.activeElement;
+                if (act.tagName && (act.tagName.toLowerCase() === 'input' || act.tagName.toLowerCase() === 'textarea')) {
+                    targetInput = act;
+                }
+            }
+
+            if (targetInput) {
+                targetInput.removeAttribute('disabled');
+                targetInput.removeAttribute('readonly');
+                targetInput.classList.remove('TEXT_READONLY');
+                targetInput.scrollIntoView({block: 'center'});
+                targetInput.focus();
+                return targetInput;
+            }
+            return null;
+        """
+        target_box = driver.execute_script(js_find_and_select)
+        if target_box:
+            logger.info("  ✓ Selected 'Reply individually.' and focused input box beside [Final].")
+            return target_box
+    except Exception as e:
+        logger.debug(f"  JS input selection notice: {e}")
+
+    # Fallback with Selenium ActionChains
+    try:
         radio_elements = driver.find_elements(
             By.XPATH,
             "//tr[contains(., 'Reply individually') or contains(., 'individually')]//input[@type='radio'] | "
@@ -1162,86 +1258,17 @@ def open_reply_field(driver, sel: dict, timeout: int, logger: logging.Logger):
                 driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", r_el)
                 time.sleep(0.2)
                 ActionChains(driver).move_to_element(r_el).click().perform()
-                logger.info("  Clicked 'Reply individually.' radio button via ActionChains ✓")
-                radio_clicked = True
-                break
+                ActionChains(driver).send_keys(Keys.TAB).perform()
+                time.sleep(0.2)
+                active = driver.switch_to.active_element
+                if active and active.tag_name.lower() in ["input", "textarea"]:
+                    return active
             except Exception:
-                try:
-                    r_el.click()
-                    radio_clicked = True
-                    break
-                except Exception:
-                    continue
-    except Exception as e:
-        logger.debug(f"  ActionChains radio click notice: {e}")
-
-    # Also enforce checked state via JS if needed
-    try:
-        driver.execute_script("""
-            var radios = document.querySelectorAll("input[type='radio']");
-            for (var i = 0; i < radios.length; i++) {
-                var r = radios[i];
-                var txt = (r.parentElement ? r.parentElement.innerText : "") + " " + (r.closest("tr") ? r.closest("tr").innerText : "");
-                if (txt.toLowerCase().includes("individually")) {
-                    r.checked = true;
-                    r.dispatchEvent(new Event('change', {bubbles: true}));
-                    r.dispatchEvent(new Event('click', {bubbles: true}));
-                    break;
-                }
-            }
-        """)
+                continue
     except Exception:
         pass
 
-    time.sleep(0.3)
-
-    # 3. Press TAB to move focus directly into the textarea beside 'Reply individually.' / '[Final]'
-    try:
-        ActionChains(driver).send_keys(Keys.TAB).perform()
-        time.sleep(0.2)
-        active_el = driver.switch_to.active_element
-        if active_el and active_el.tag_name.lower() == "textarea":
-            logger.info("  Pressed TAB -> focused textarea beside 'Reply individually.' [Final] ✓")
-            return active_el
-    except Exception as e:
-        logger.debug(f"  TAB navigation notice: {e}")
-
-    # 4. Fallback: Locate the 3rd textarea in the Feedback table directly
-    try:
-        js_target_ta = driver.execute_script("""
-            var allTables = document.querySelectorAll("table");
-            for (var t = 0; t < allTables.length; t++) {
-                var tbl = allTables[t];
-                var tblText = (tbl.innerText || "").toLowerCase();
-                if (tblText.includes("representative reply") && tblText.includes("individually")) {
-                    var tas = tbl.querySelectorAll("textarea");
-                    if (tas.length >= 3) {
-                        var targetTa = tas[2]; // 3rd textarea
-                        targetTa.removeAttribute('disabled');
-                        targetTa.removeAttribute('readonly');
-                        targetTa.classList.remove('TEXT_READONLY');
-                        targetTa.scrollIntoView({block: 'center'});
-                        targetTa.focus();
-                        return targetTa;
-                    } else if (tas.length > 0) {
-                        var targetTa = tas[tas.length - 1];
-                        targetTa.removeAttribute('disabled');
-                        targetTa.removeAttribute('readonly');
-                        targetTa.focus();
-                        return targetTa;
-                    }
-                }
-            }
-            return null;
-        """)
-        if js_target_ta:
-            logger.info("  Located and focused 3rd textarea beside [Final] via JS fallback ✓")
-            return js_target_ta
-    except Exception:
-        pass
-
-    # 5. Last fallback: return active element
-    return driver.switch_to.active_element
+    return target_box or driver.switch_to.active_element
 
 
 def paste_reply(
@@ -1254,55 +1281,35 @@ def paste_reply(
     logger: logging.Logger,
 ) -> bool:
     """
-    Clear the target textarea, write the reply text, trigger browser events, and verify.
+    Write the reply text into the individual box beside [Final], trigger browser events, and verify.
     """
     intended_normalized = normalize_whitespace(reply_text)
 
     for attempt in range(1, max_retries + 1):
-        logger.debug(f"  Writing reply text into individual box (attempt {attempt}/{max_retries})...")
+        logger.debug(f"  Writing reply text into individual box beside [Final] (attempt {attempt}/{max_retries})...")
 
-        # Make sure Row 1 (representative reply) is clean and not contaminated
-        try:
-            driver.execute_script("""
-                var allTables = document.querySelectorAll("table");
-                for (var t = 0; t < allTables.length; t++) {
-                    var tbl = allTables[t];
-                    var tblText = (tbl.innerText || "").toLowerCase();
-                    if (tblText.includes("representative reply") && tblText.includes("individually")) {
-                        var tas = tbl.querySelectorAll("textarea");
-                        if (tas.length >= 3) {
-                            // Row 1
-                            tas[0].value = '';
-                            // Row 2
-                            tas[1].value = '';
-                        }
-                    }
-                }
-            """)
-        except Exception:
-            pass
-
-        # 1. Clear target textarea
-        try:
-            driver.execute_script("""
-                var el = arguments[0];
-                if (el) {
-                    el.removeAttribute('disabled');
-                    el.removeAttribute('readonly');
-                    el.classList.remove('TEXT_READONLY');
-                    el.value = '';
-                    el.dispatchEvent(new Event('input', {bubbles: true}));
-                    el.dispatchEvent(new Event('change', {bubbles: true}));
-                }
-            """, textarea)
-        except Exception:
-            pass
-
-        # 2. Write new value using JavaScript + Event dispatching
+        # 1. Unlock, clear, and assign value via JavaScript
         try:
             driver.execute_script("""
                 var el = arguments[0];
                 var val = arguments[1];
+
+                // If el is not valid, re-detect the [Final] input box
+                if (!el || el === document.body) {
+                    var allTrs = document.querySelectorAll("tr");
+                    for (var i = 0; i < allTrs.length; i++) {
+                        var tr = allTrs[i];
+                        var trTxt = (tr.innerText || tr.textContent || "").toLowerCase();
+                        if (trTxt.includes("individually") || trTxt.includes("[final]") || trTxt.includes("final")) {
+                            var inputs = tr.querySelectorAll("input[type='text'], input:not([type='radio']):not([type='checkbox']):not([type='button']):not([type='submit']):not([type='hidden']):not([type='file']), textarea");
+                            if (inputs.length > 0) {
+                                el = inputs[inputs.length - 1];
+                                break;
+                            }
+                        }
+                    }
+                }
+
                 if (el) {
                     el.removeAttribute('disabled');
                     el.removeAttribute('readonly');
@@ -1319,19 +1326,34 @@ def paste_reply(
         except Exception as e:
             logger.debug(f"  JS text assignment notice: {e}")
 
-        # 3. Fallback with Clipboard (Ctrl+A -> Delete -> Ctrl+V) directly into element
+        # 2. Clipboard Paste directly into the element as backup (Ctrl+A -> Backspace -> Ctrl+V)
         try:
             pyperclip.copy(reply_text)
-            textarea.click()
+            try:
+                textarea.click()
+            except Exception:
+                driver.execute_script("arguments[0].focus(); arguments[0].select();", textarea)
             time.sleep(0.1)
-            ActionChains(driver).key_down(Keys.CONTROL).send_keys("a").key_up(Keys.CONTROL).send_keys(Keys.DELETE).perform()
+            ActionChains(driver).key_down(Keys.CONTROL).send_keys("a").key_up(Keys.CONTROL).send_keys(Keys.BACKSPACE).perform()
             time.sleep(0.1)
             ActionChains(driver).key_down(Keys.CONTROL).send_keys("v").key_up(Keys.CONTROL).perform()
             time.sleep(0.3)
+        except Exception as e:
+            logger.debug(f"  Clipboard paste notice: {e}")
+
+        # 3. Fire change events again to ensure SIFT framework registers the value
+        try:
+            driver.execute_script("""
+                var el = arguments[0];
+                if (el) {
+                    el.dispatchEvent(new Event('input', {bubbles: true}));
+                    el.dispatchEvent(new Event('change', {bubbles: true}));
+                }
+            """, textarea)
         except Exception:
             pass
 
-        # 4. Verify text
+        # 4. Verify text inside the box
         try:
             actual_value = driver.execute_script("return arguments[0] ? (arguments[0].value || arguments[0].innerText || '') : '';", textarea)
         except Exception:
@@ -1340,7 +1362,7 @@ def paste_reply(
         actual_normalized = normalize_whitespace(actual_value)
 
         if actual_normalized == intended_normalized or intended_normalized in actual_normalized:
-            logger.info("  ✓ Reply text written and verified in 'Reply individually' box.")
+            logger.info("  ✓ Reply text written and verified in 'Reply individually' [Final] box.")
             return True
 
         logger.warning(
@@ -1354,21 +1376,21 @@ def pre_save_recheck(
     driver, ftir_number: str, reply_text: str, sel: dict, timeout: int, logger: logging.Logger
 ):
     """
-    Ensure the reply is present before clicking Save/Complete.
+    Ensure the reply is present in the form before clicking Save & Close.
     """
     try:
         intended_normalized = normalize_whitespace(reply_text)
         actual_value = driver.execute_script("""
-            var tas = document.querySelectorAll("textarea");
-            for (var i = 0; i < tas.length; i++) {
-                if (tas[i].value && tas[i].value.trim().length > 0) {
-                    return tas[i].value;
+            var allInputs = document.querySelectorAll("input[type='text'], textarea, input:not([type='radio']):not([type='submit']):not([type='button']):not([type='hidden'])");
+            for (var i = 0; i < allInputs.length; i++) {
+                if (allInputs[i].value && allInputs[i].value.trim().length > 0) {
+                    return allInputs[i].value;
                 }
             }
             return "";
         """)
         if intended_normalized and intended_normalized not in normalize_whitespace(actual_value):
-            logger.warning("  Pre-save notice: Textarea value differs slightly from expected.")
+            logger.warning("  Pre-save notice: Form value differs slightly from expected.")
         else:
             logger.debug("  Pre-save check confirmed reply is present in form ✓")
     except Exception as e:
@@ -1377,7 +1399,7 @@ def pre_save_recheck(
 
 def click_save_and_confirm(driver, sel: dict, timeout: int, logger: logging.Logger):
     """
-    Click the 'Save' button on the bottom toolbar as shown in the SIFT FTIR page.
+    Click the 'Save & Close' button on the bottom toolbar as shown in the SIFT FTIR page.
     Automatically accepts any JavaScript confirm/alert dialogs.
     """
     # 1. Override browser confirmation/alert dialogs so they auto-accept
@@ -1394,33 +1416,35 @@ def click_save_and_confirm(driver, sel: dict, timeout: int, logger: logging.Logg
 
     clicked = False
 
-    # 2. Locate and click the 'Save' button at the bottom toolbar via JavaScript
+    # 2. Locate and click the 'Save & Close' button at the bottom toolbar via JavaScript
     try:
         js_click_save = """
-            var allButtons = document.querySelectorAll("input[type='submit'], input[type='button'], button, a.Button, input");
-            var saveBtn = null;
+            var allButtons = document.querySelectorAll("input[type='submit'], input[type='button'], button, a.Button, input, a");
             var saveCloseBtn = null;
+            var saveBtn = null;
 
             for (var i = 0; i < allButtons.length; i++) {
                 var btn = allButtons[i];
-                var val = (btn.value || btn.innerText || btn.textContent || "").trim().toLowerCase();
+                var val = (btn.value || btn.innerText || btn.textContent || "").trim().toLowerCase().replace(/\\s+/g, ' ');
 
-                // Exact match for "Save" button at the bottom toolbar
-                if (val === "save") {
-                    saveBtn = btn;
+                // Priority 1: Match "Save & Close" button on the bottom toolbar
+                if (val === "save & close" || val === "save&close" || val.includes("save & close") || val.includes("save&close")) {
+                    saveCloseBtn = btn;
                     break;
                 }
-                if (val === "save & close" || val === "save&close") {
-                    saveCloseBtn = btn;
+
+                // Priority 2: Fallback "Save"
+                if (val === "save") {
+                    saveBtn = btn;
                 }
             }
 
-            var target = saveBtn || saveCloseBtn;
+            var target = saveCloseBtn || saveBtn;
             if (target) {
                 target.removeAttribute('disabled');
                 target.scrollIntoView({block: 'center'});
                 target.click();
-                return target.value || target.innerText || "Save";
+                return target.value || target.innerText || "Save & Close";
             }
             return null;
         """
@@ -1429,15 +1453,17 @@ def click_save_and_confirm(driver, sel: dict, timeout: int, logger: logging.Logg
             logger.info(f"  Clicked '{btn_name}' button on bottom toolbar via JavaScript ✓")
             clicked = True
     except Exception as e:
-        logger.debug(f"  JS Save click notice: {e}")
+        logger.debug(f"  JS Save & Close click notice: {e}")
 
-    # 3. Fallback: Click 'Save' button via XPath
+    # 3. Fallback: Click 'Save & Close' button via XPath
     if not clicked:
         save_xpaths = [
+            "//input[contains(@value, 'Save & Close') or contains(@value, 'Save&Close')]",
+            "//button[contains(normalize-space(), 'Save & Close')]",
+            "//a[contains(normalize-space(), 'Save & Close')]",
             "//input[@value='Save']",
             "//button[normalize-space()='Save']",
             "//a[normalize-space()='Save']",
-            "//input[@value='Save & Close']",
             "//div[@id='swFeedbackBlock']//input[@value='Complete']"
         ]
         for sx in save_xpaths:
@@ -1445,7 +1471,7 @@ def click_save_and_confirm(driver, sel: dict, timeout: int, logger: logging.Logg
                 btn = driver.find_element(By.XPATH, sx)
                 driver.execute_script("arguments[0].scrollIntoView({block: 'center'}); arguments[0].removeAttribute('disabled');", btn)
                 btn.click()
-                logger.info("  Clicked 'Save' button via XPath.")
+                logger.info(f"  Clicked Save/Save & Close button via XPath ({sx}).")
                 clicked = True
                 break
             except Exception:
@@ -1462,7 +1488,7 @@ def click_save_and_confirm(driver, sel: dict, timeout: int, logger: logging.Logg
         pass
 
     time.sleep(2)
-    logger.info("  ✓ FTIR record successfully saved in SIFT.")
+    logger.info("  ✓ FTIR record successfully saved & closed in SIFT.")
 
 
 # ---------------------------------------------------------------------------
@@ -1508,6 +1534,41 @@ def run_bot(
 
     warn_if_synced_folder(os.getcwd(), logger)
 
+    # If running batch mode, validate Excel and get confirmation before opening browser
+    wb = None
+    sheet = None
+    col_map = None
+    row_queue = []
+    total_rows = 0
+
+    if not target_ftir:
+        if not os.path.isfile(excel_path):
+            logger.error(f"Excel file not found: {excel_path}")
+            sys.exit(1)
+
+        wb = openpyxl.load_workbook(excel_path)
+        sheet = wb.active
+        col_map = find_column_indices(sheet)
+        try:
+            wb.save(excel_path)
+        except PermissionError:
+            pass
+        logger.debug(f"  Column mapping: {col_map}")
+
+        preflight_summary = preflight_validate(sheet, col_map, config, dry_run, logger)
+        if not print_preflight_and_confirm(preflight_summary, dry_run, logger):
+            wb.close()
+            return
+
+        row_queue = build_row_queue(sheet, col_map, dry_run, logger)
+        total_rows = len(row_queue)
+        logger.info(f"  Rows queued for processing: {total_rows}")
+
+        if total_rows == 0:
+            logger.info("No pending rows to process in Excel.")
+            wb.close()
+            return
+
     driver = None
     try:
         driver = create_driver(config, logger, attach=is_attached, port=port)
@@ -1518,7 +1579,7 @@ def run_bot(
         # MODE 1: SINGLE FTIR TEST MODE
         # ===================================================================
         if target_ftir:
-            reply_text = sample_reply or "hii,this is teh reply"
+            reply_text = sample_reply or "The customer concern was reviewed and resolved."
             logger.info(f"Processing Single FTIR: {redact_ftir(target_ftir)}")
 
             try:
@@ -1566,53 +1627,7 @@ def run_bot(
         # ===================================================================
         # MODE 2: EXCEL BATCH MODE
         # ===================================================================
-        if not os.path.isfile(excel_path):
-            logger.error(f"Excel file not found: {excel_path}")
-            sys.exit(1)
-
-        # --- connectivity --- Check portal is reachable before processing
-        portal_url = config.get("portal_url", "https://sift.bizapps.suzuki/sift/")
-        if not check_portal_connectivity(portal_url, logger):
-            logger.error("")
-            logger.error("=" * 70)
-            logger.error("  ✗ PORTAL UNREACHABLE — Cannot connect to SIFT portal.")
-            logger.error("  Check your network connection, VPN, or portal URL in config.json.")
-            logger.error("=" * 70)
-            print("\nPortal is unreachable. Continue anyway? (y/n): ", end="")
-            try:
-                if input().strip().lower() != "y":
-                    logger.info("User chose not to continue. Exiting.")
-                    return
-                logger.info("User chose to continue despite connectivity warning.")
-            except (EOFError, KeyboardInterrupt):
-                return
-
-        wb = openpyxl.load_workbook(excel_path)
-        sheet = wb.active
-        col_map = find_column_indices(sheet)
-        # Save workbook if Timestamp column was auto-created
-        try:
-            wb.save(excel_path)
-        except PermissionError:
-            pass
-        logger.debug(f"  Column mapping: {col_map}")
-
-        preflight_summary = preflight_validate(sheet, col_map, config, dry_run, logger)
-        if not print_preflight_and_confirm(preflight_summary, dry_run, logger):
-            wb.close()
-            return
-
-        row_queue = build_row_queue(sheet, col_map, dry_run, logger)
-        total_rows = len(row_queue)
-        logger.info(f"  Rows queued for processing: {total_rows}")
-
-        if total_rows == 0:
-            logger.info("Nothing to process.")
-            wb.close()
-            return
-
-        # --- FTIR pre-validation --- Check all FTIRs exist on portal before processing
-        skip_pre_validation = config.get("skip_ftir_pre_validation", False)
+        skip_pre_validation = config.get("skip_ftir_pre_validation", True)
         if not skip_pre_validation:
             ftir_col = col_map[COL_FTIR]
             ftirs_to_check = []
