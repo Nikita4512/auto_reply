@@ -53,8 +53,10 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Constants — Excel column names (change here if the real sheet differs)
 # ---------------------------------------------------------------------------
+# NOTE: These are the LOGICAL names used as dict keys inside the code.
+# The ACTUAL header text in Excel is matched flexibly in find_column_indices().
 COL_FTIR = "FTIR Number"
-COL_REPLY = "Reply"
+COL_REPLY = "Individual Reply"   # Matches 'Individual Reply' column in Excel
 COL_STATUS = "Status"
 COL_TIMESTAMP = "Timestamp"
 
@@ -200,13 +202,14 @@ def find_column_indices(sheet) -> dict:
     col_map = {}
 
     for raw_header, idx in headers.items():
-        # Normalize: lowercase, remove punctuation, collapse whitespace
+        # Normalize: lowercase, remove extra spaces, keep alphanumeric + space
         h_norm = re.sub(r"[^\w\s]", " ", raw_header.lower())
         h_norm = re.sub(r"\s+", " ", h_norm).strip()
 
         if "ftir" in h_norm and COL_FTIR not in col_map:
             col_map[COL_FTIR] = idx
-        elif any(k in h_norm for k in ("reply", "replies", "response")) and COL_REPLY not in col_map:
+        # PRIORITY: 'Individual Reply' must match BEFORE generic 'reply'
+        elif ("individual" in h_norm and "reply" in h_norm) and COL_REPLY not in col_map:
             col_map[COL_REPLY] = idx
         elif any(k in h_norm for k in ("status", "state")) and COL_STATUS not in col_map:
             col_map[COL_STATUS] = idx
@@ -1286,42 +1289,38 @@ def open_reply_field(driver, sel: dict, timeout: int, logger: logging.Logger):
 
     time.sleep(0.3)
 
-    # 3. Locate the Individual Reply textarea (the 3rd textarea in the Feedback block / beside [Final])
+    # 3. Locate the EXACT textarea in the 'Reply individually.' row (beside [Final])
     target_box = None
     try:
         js_find_ta = """
-            // Method 1: Find all textareas inside swFeedbackBlock
-            var feedback = document.getElementById("swFeedbackBlock");
-            if (feedback) {
-                var tas = feedback.querySelectorAll("textarea");
-                if (tas.length >= 3) {
-                    return tas[2]; // 3rd textarea is the Individual Reply [Final] box
-                } else if (tas.length > 0) {
+            // STEP 1: Find the <tr> row that contains 'Reply individually' text
+            // This is the row BELOW 'Apply the representative reply with some modification'
+            var allTrs = document.querySelectorAll("tr");
+            var individuallyRow = null;
+
+            for (var i = 0; i < allTrs.length; i++) {
+                var tr = allTrs[i];
+                var trTxt = (tr.innerText || tr.textContent || "").toLowerCase();
+                // Must contain 'reply individually' AND NOT be the representative reply row
+                if (trTxt.includes("reply individually") && !trTxt.includes("apply the representative")) {
+                    individuallyRow = tr;
+                    break;
+                }
+            }
+
+            // STEP 2: Get the last textarea inside that specific row
+            if (individuallyRow) {
+                var tas = individuallyRow.querySelectorAll("textarea, input[type='text']");
+                if (tas.length > 0) {
                     return tas[tas.length - 1];
                 }
             }
 
-            // Method 2: Find table containing 'representative reply' or 'reply individually'
-            var tables = document.querySelectorAll("table");
-            for (var i = 0; i < tables.length; i++) {
-                var tbl = tables[i];
-                var txt = (tbl.innerText || "").toLowerCase();
-                if (txt.includes("representative reply") || txt.includes("reply individually")) {
-                    var tas = tbl.querySelectorAll("textarea");
-                    if (tas.length >= 3) {
-                        return tas[2];
-                    } else if (tas.length > 0) {
-                        return tas[tas.length - 1];
-                    }
-                }
-            }
-
-            // Method 3: Search for row containing '[Final]'
-            var allTrs = document.querySelectorAll("tr");
+            // STEP 3: Fallback - find [Final] label and get textarea in same row
             for (var j = 0; j < allTrs.length; j++) {
                 var tr = allTrs[j];
-                var trTxt = (tr.innerText || "").toLowerCase();
-                if (trTxt.includes("[final]") || trTxt.includes("individually")) {
+                var trTxt = (tr.innerText || tr.textContent || "").toLowerCase();
+                if (trTxt.includes("[final]") && trTxt.includes("individually")) {
                     var tas = tr.querySelectorAll("textarea, input[type='text']");
                     if (tas.length > 0) {
                         return tas[tas.length - 1];
@@ -1329,10 +1328,16 @@ def open_reply_field(driver, sel: dict, timeout: int, logger: logging.Logger):
                 }
             }
 
-            // Method 4: All textareas on page -> return the last one
-            var allTas = document.querySelectorAll("textarea");
-            if (allTas.length > 0) {
-                return allTas[allTas.length - 1];
+            // STEP 4: Last fallback - checked radio button is in 'reply individually' row
+            var checkedRadio = document.querySelector("input[type='radio']:checked");
+            if (checkedRadio) {
+                var row = checkedRadio.closest("tr");
+                if (row) {
+                    var tas = row.querySelectorAll("textarea, input[type='text']");
+                    if (tas.length > 0) {
+                        return tas[tas.length - 1];
+                    }
+                }
             }
 
             return null;
@@ -1340,30 +1345,37 @@ def open_reply_field(driver, sel: dict, timeout: int, logger: logging.Logger):
         target_box = driver.execute_script(js_find_ta)
         if target_box:
             driver.execute_script("""
-                arguments[0].removeAttribute('disabled');
-                arguments[0].removeAttribute('readonly');
-                arguments[0].classList.remove('TEXT_READONLY');
-                arguments[0].style.color = '#000000';
-                arguments[0].style.backgroundColor = '#ffffff';
-                arguments[0].scrollIntoView({block: 'center'});
-                arguments[0].focus();
+                var el = arguments[0];
+                el.removeAttribute('disabled');
+                el.removeAttribute('readonly');
+                el.classList.remove('TEXT_READONLY');
+                el.style.color = '#000000';
+                el.style.backgroundColor = '#ffffff';
+                el.scrollIntoView({block: 'center'});
+                el.focus();
             """, target_box)
-            logger.info("  ✓ Found and focused Individual Reply textarea beside '[Final]'.")
+            logger.info("  ✓ Found and focused 'Reply individually' textarea beside '[Final]'.")
             return target_box
     except Exception as e:
         logger.debug(f"  JS box locate notice: {e}")
 
-    # Fallback via XPath
+    # XPath fallback — specifically the 'Reply individually' row
     try:
-        xpath_tas = driver.find_elements(By.XPATH, "//div[@id='swFeedbackBlock']//textarea | //tr[contains(., 'Reply individually')]//textarea | //textarea")
+        xpath_tas = driver.find_elements(
+            By.XPATH,
+            "//tr[.//input[@type='radio' and @checked] and contains(., 'individually')]//textarea | "
+            "//tr[contains(., 'Reply individually') and not(contains(., 'representative'))]//textarea"
+        )
         if xpath_tas:
-            chosen = xpath_tas[-1] if len(xpath_tas) < 3 else xpath_tas[2]
+            chosen = xpath_tas[-1]
             driver.execute_script("arguments[0].scrollIntoView({block: 'center'}); arguments[0].focus();", chosen)
+            logger.info("  ✓ Found textarea via XPath fallback in Reply individually row.")
             return chosen
     except Exception:
         pass
 
     return target_box or driver.switch_to.active_element
+
 
 
 def paste_reply(
