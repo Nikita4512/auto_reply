@@ -1130,7 +1130,7 @@ def open_reply_field(driver, sel: dict, timeout: int, logger: logging.Logger):
     1. Check all frames if the record is framed, switch to the right frame.
     2. Ensure Feedback / Individual Reply section (swFeedbackBlock) is expanded.
     3. Click the 'Reply individually.' radio button.
-    4. Focus and return the exact text input / textarea box beside '[Final]'.
+    4. Focus and return the exact textarea beside '[Final]'.
     """
     # 1. Check if the page has frames and find the frame containing Feedback / Reply
     frames = driver.find_elements(By.TAG_NAME, "frame") + driver.find_elements(By.TAG_NAME, "iframe")
@@ -1162,90 +1162,29 @@ def open_reply_field(driver, sel: dict, timeout: int, logger: logging.Logger):
     except Exception:
         pass
 
-    # 3. Click 'Reply individually.' radio button + Locate the box right after [Final]
-    target_box = None
+    # 3. Click 'Reply individually.' radio button
     try:
-        js_find_and_select = """
-            // 1. Select the 'Reply individually' radio button
+        driver.execute_script("""
             var radios = document.querySelectorAll("input[type='radio']");
-            var indRadio = null;
             for (var i = 0; i < radios.length; i++) {
                 var r = radios[i];
                 var row = r.closest("tr") || r.parentElement;
                 var txt = ((row ? row.innerText : "") + " " + (r.name || "") + " " + (r.value || "")).toLowerCase();
                 if (txt.includes("individually") || txt.includes("individual")) {
-                    indRadio = r;
+                    r.removeAttribute('disabled');
+                    r.checked = true;
+                    r.scrollIntoView({block: 'center'});
+                    r.dispatchEvent(new Event('change', {bubbles: true}));
+                    r.dispatchEvent(new Event('click', {bubbles: true}));
                     break;
                 }
             }
-
-            if (indRadio) {
-                indRadio.removeAttribute('disabled');
-                indRadio.checked = true;
-                indRadio.scrollIntoView({block: 'center'});
-                indRadio.dispatchEvent(new Event('change', {bubbles: true}));
-                indRadio.dispatchEvent(new Event('click', {bubbles: true}));
-            }
-
-            // 2. Find the input / textarea box right beside '[Final]' or in the 'Reply individually' row
-            var targetInput = null;
-            var allTrs = document.querySelectorAll("tr");
-            for (var i = 0; i < allTrs.length; i++) {
-                var tr = allTrs[i];
-                var trTxt = (tr.innerText || tr.textContent || "").toLowerCase();
-                if (trTxt.includes("individually") || trTxt.includes("[final]") || trTxt.includes("final")) {
-                    var inputs = tr.querySelectorAll("input[type='text'], input:not([type='radio']):not([type='checkbox']):not([type='button']):not([type='submit']):not([type='hidden']):not([type='file']), textarea");
-                    if (inputs.length > 0) {
-                        targetInput = inputs[inputs.length - 1]; // Box right after [Final]
-                        break;
-                    }
-                }
-            }
-
-            // 3. Fallback: Search all cells containing '[Final]'
-            if (!targetInput) {
-                var allTds = document.querySelectorAll("td, span, font, label, div");
-                for (var j = 0; j < allTds.length; j++) {
-                    var td = allTds[j];
-                    if ((td.innerText || "").trim().toLowerCase().includes("[final]")) {
-                        var parentTr = td.closest("tr") || td.parentElement;
-                        if (parentTr) {
-                            var found = parentTr.querySelector("input[type='text'], input:not([type='radio']):not([type='submit']):not([type='button']):not([type='hidden']), textarea");
-                            if (found) {
-                                targetInput = found;
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // 4. Fallback: If focus moved to active element
-            if (!targetInput && document.activeElement) {
-                var act = document.activeElement;
-                if (act.tagName && (act.tagName.toLowerCase() === 'input' || act.tagName.toLowerCase() === 'textarea')) {
-                    targetInput = act;
-                }
-            }
-
-            if (targetInput) {
-                targetInput.removeAttribute('disabled');
-                targetInput.removeAttribute('readonly');
-                targetInput.classList.remove('TEXT_READONLY');
-                targetInput.scrollIntoView({block: 'center'});
-                targetInput.focus();
-                return targetInput;
-            }
-            return null;
-        """
-        target_box = driver.execute_script(js_find_and_select)
-        if target_box:
-            logger.info("  ✓ Selected 'Reply individually.' and focused input box beside [Final].")
-            return target_box
+        """)
+        time.sleep(0.4)
     except Exception as e:
-        logger.debug(f"  JS input selection notice: {e}")
+        logger.debug(f"  JS radio selection notice: {e}")
 
-    # Fallback with Selenium ActionChains
+    # Fallback radio click via ActionChains
     try:
         radio_elements = driver.find_elements(
             By.XPATH,
@@ -1258,16 +1197,94 @@ def open_reply_field(driver, sel: dict, timeout: int, logger: logging.Logger):
                 driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", r_el)
                 time.sleep(0.2)
                 ActionChains(driver).move_to_element(r_el).click().perform()
-                ActionChains(driver).send_keys(Keys.TAB).perform()
-                time.sleep(0.2)
-                active = driver.switch_to.active_element
-                if active and active.tag_name.lower() in ["input", "textarea"]:
-                    return active
+                break
             except Exception:
                 continue
     except Exception:
         pass
 
+    time.sleep(0.3)
+
+    # 4. Locate the textarea directly next to [Final]
+    target_box = None
+    try:
+        js_find_final_box = """
+            // Find the element containing '[Final]'
+            var allElements = document.querySelectorAll("td, th, span, div, font, b, strong, label");
+            var finalEl = null;
+            for (var i = 0; i < allElements.length; i++) {
+                var el = allElements[i];
+                var t = (el.innerText || el.textContent || "").trim();
+                if (t.toLowerCase() === "[final]" || t.toLowerCase().includes("[final]")) {
+                    finalEl = el;
+                    break;
+                }
+            }
+
+            var targetTa = null;
+            if (finalEl) {
+                // Check in same cell or following sibling cell
+                var parentCell = finalEl.closest("td") || finalEl.parentElement;
+                if (parentCell) {
+                    targetTa = parentCell.querySelector("textarea, input[type='text']");
+                    if (!targetTa && parentCell.nextElementSibling) {
+                        targetTa = parentCell.nextElementSibling.querySelector("textarea, input[type='text']");
+                    }
+                }
+                // Check parent row
+                if (!targetTa) {
+                    var row = finalEl.closest("tr");
+                    if (row) {
+                        var tas = row.querySelectorAll("textarea, input[type='text']");
+                        if (tas.length > 0) {
+                            targetTa = tas[tas.length - 1];
+                        }
+                    }
+                }
+            }
+
+            // Fallback: search row containing 'Reply individually'
+            if (!targetTa) {
+                var allTrs = document.querySelectorAll("tr");
+                for (var j = 0; j < allTrs.length; j++) {
+                    var tr = allTrs[j];
+                    var trTxt = (tr.innerText || tr.textContent || "").toLowerCase();
+                    if (trTxt.includes("individually") || trTxt.includes("[final]")) {
+                        var tas = tr.querySelectorAll("textarea, input[type='text']");
+                        if (tas.length > 0) {
+                            targetTa = tas[tas.length - 1];
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Last fallback: last textarea on page
+            if (!targetTa) {
+                var allTas = document.querySelectorAll("textarea");
+                if (allTas.length > 0) {
+                    targetTa = allTas[allTas.length - 1];
+                }
+            }
+
+            if (targetTa) {
+                targetTa.removeAttribute('disabled');
+                targetTa.removeAttribute('readonly');
+                targetTa.classList.remove('TEXT_READONLY');
+                targetTa.scrollIntoView({block: 'center'});
+                targetTa.focus();
+                return targetTa;
+            }
+            return null;
+        """
+        target_box = driver.execute_script(js_find_final_box)
+        if target_box:
+            logger.info("  ✓ Located textarea box beside '[Final]'.")
+            return target_box
+    except Exception as e:
+        logger.debug(f"  JS box locate notice: {e}")
+
+    # Fallback to active element
     return target_box or driver.switch_to.active_element
 
 
@@ -1281,41 +1298,46 @@ def paste_reply(
     logger: logging.Logger,
 ) -> bool:
     """
-    Write the reply text into the individual box beside [Final], trigger browser events, and verify.
+    Write the reply text from Excel into the individual box beside [Final], trigger browser events, and verify.
     """
     intended_normalized = normalize_whitespace(reply_text)
 
     for attempt in range(1, max_retries + 1):
-        logger.debug(f"  Writing reply text into individual box beside [Final] (attempt {attempt}/{max_retries})...")
+        logger.debug(f"  Writing Excel reply into box beside [Final] (attempt {attempt}/{max_retries})...")
 
-        # 1. Unlock, clear, and assign value via JavaScript
+        # 1. Unlock, clear placeholder, and set value via JavaScript
         try:
             driver.execute_script("""
-                var el = arguments[0];
                 var val = arguments[1];
+                var el = arguments[0];
 
-                // If el is not valid, re-detect the [Final] input box
+                // If el is not valid or lost reference, find the textarea beside [Final]
                 if (!el || el === document.body) {
-                    var allTrs = document.querySelectorAll("tr");
-                    for (var i = 0; i < allTrs.length; i++) {
-                        var tr = allTrs[i];
-                        var trTxt = (tr.innerText || tr.textContent || "").toLowerCase();
-                        if (trTxt.includes("individually") || trTxt.includes("[final]") || trTxt.includes("final")) {
-                            var inputs = tr.querySelectorAll("input[type='text'], input:not([type='radio']):not([type='checkbox']):not([type='button']):not([type='submit']):not([type='hidden']):not([type='file']), textarea");
-                            if (inputs.length > 0) {
-                                el = inputs[inputs.length - 1];
-                                break;
+                    var allElements = document.querySelectorAll("td, th, span, div, font, b, strong");
+                    for (var i = 0; i < allElements.length; i++) {
+                        if ((allElements[i].innerText || "").trim().toLowerCase().includes("[final]")) {
+                            var row = allElements[i].closest("tr");
+                            if (row) {
+                                var tas = row.querySelectorAll("textarea, input[type='text']");
+                                if (tas.length > 0) { el = tas[tas.length - 1]; break; }
                             }
                         }
                     }
+                }
+                if (!el) {
+                    var allTas = document.querySelectorAll("textarea");
+                    if (allTas.length > 0) { el = allTas[allTas.length - 1]; }
                 }
 
                 if (el) {
                     el.removeAttribute('disabled');
                     el.removeAttribute('readonly');
                     el.classList.remove('TEXT_READONLY');
+                    el.style.color = '#000000';
                     el.focus();
                     el.value = val;
+                    el.innerText = val;
+                    el.dispatchEvent(new Event('focus', {bubbles: true}));
                     el.dispatchEvent(new Event('input', {bubbles: true}));
                     el.dispatchEvent(new Event('change', {bubbles: true}));
                     el.dispatchEvent(new Event('blur', {bubbles: true}));
@@ -1326,30 +1348,40 @@ def paste_reply(
         except Exception as e:
             logger.debug(f"  JS text assignment notice: {e}")
 
-        # 2. Clipboard Paste directly into the element as backup (Ctrl+A -> Backspace -> Ctrl+V)
+        # 2. Clipboard Paste directly into the element (Ctrl+A -> Backspace -> Ctrl+V)
         try:
             pyperclip.copy(reply_text)
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'}); arguments[0].focus();", textarea)
+            time.sleep(0.1)
             try:
                 textarea.click()
             except Exception:
-                driver.execute_script("arguments[0].focus(); arguments[0].select();", textarea)
+                pass
             time.sleep(0.1)
-            ActionChains(driver).key_down(Keys.CONTROL).send_keys("a").key_up(Keys.CONTROL).send_keys(Keys.BACKSPACE).perform()
+            ActionChains(driver).key_down(Keys.CONTROL).send_keys("a").key_up(Keys.CONTROL).perform()
+            time.sleep(0.1)
+            ActionChains(driver).send_keys(Keys.BACKSPACE).perform()
             time.sleep(0.1)
             ActionChains(driver).key_down(Keys.CONTROL).send_keys("v").key_up(Keys.CONTROL).perform()
             time.sleep(0.3)
+            # Extra keypress to ensure SIFT change listeners trigger
+            ActionChains(driver).send_keys(" ").send_keys(Keys.BACKSPACE).perform()
+            time.sleep(0.2)
         except Exception as e:
             logger.debug(f"  Clipboard paste notice: {e}")
 
-        # 3. Fire change events again to ensure SIFT framework registers the value
+        # 3. Final JS value enforcement to guarantee placeholder is gone
         try:
             driver.execute_script("""
                 var el = arguments[0];
+                var val = arguments[1];
                 if (el) {
+                    el.value = val;
+                    el.style.color = '#000000';
                     el.dispatchEvent(new Event('input', {bubbles: true}));
                     el.dispatchEvent(new Event('change', {bubbles: true}));
                 }
-            """, textarea)
+            """, textarea, reply_text)
         except Exception:
             pass
 
@@ -1361,12 +1393,13 @@ def paste_reply(
 
         actual_normalized = normalize_whitespace(actual_value)
 
-        if actual_normalized == intended_normalized or intended_normalized in actual_normalized:
+        if intended_normalized in actual_normalized or actual_normalized == intended_normalized:
             logger.info("  ✓ Reply text written and verified in 'Reply individually' [Final] box.")
             return True
 
+        # If actual value still contains placeholder, clear and retry
         logger.warning(
-            f"  Paste verification attempt {attempt} mismatch. Expected: {len(intended_normalized)} chars, Found: {len(actual_normalized)} chars."
+            f"  Paste verification attempt {attempt} mismatch. Value length: {len(actual_normalized)} chars."
         )
 
     return False
