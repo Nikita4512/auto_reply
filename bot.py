@@ -1159,34 +1159,40 @@ def open_reply_field(driver, sel: dict, timeout: int, logger: logging.Logger):
     """
     On SIFT FTIR record page:
     1. Switch to the correct content frame.
-    2. Click the top Feedback logo/link/anchor to jump & scroll down to Feedback.
-    3. Expand Feedback Block (swFeedbackBlock).
+    2. Click the 'Page with Minus sign' toggle logo / icon to collapse upper sections.
+    3. Ensure Feedback Block (swFeedbackBlock) is expanded.
     4. Select 'Reply individually.' radio button.
     5. Return the exact Individual Reply textarea element.
     """
     find_feedback_frame(driver, logger)
 
-    # 1. Click top Feedback logo / anchor link / button to scroll down automatically
+    # 1. Click the 'Page with Minus sign' toggle logo / icon to collapse upper sections
     try:
-        js_click_feedback_logo = """
-            // 1. Try to find any top navigation link, logo, or button for FEEDBACK
-            var allLinks = document.querySelectorAll("a, input[type='button'], button, img, span, td");
-            for (var i = 0; i < allLinks.length; i++) {
-                var el = allLinks[i];
-                var txt = (el.innerText || el.textContent || el.alt || el.title || el.value || "").toLowerCase().trim();
-                var href = (el.href || el.getAttribute("onclick") || el.getAttribute("src") || "").toLowerCase();
-                
-                // Matches 'FEEDBACK' icon/link or 'swFeedbackBlock' anchor at the top
-                if (txt === "feedback" || txt === "go to feedback" || txt.includes("feedback") || href.includes("swfeedbackblock") || href.includes("feedback")) {
-                    // Make sure it's not the section header itself
-                    if (el.id !== "swFeedbackBlock") {
-                        el.click();
-                        break;
-                    }
+        js_click_minus_logo = """
+            // 1. Look for the 'Page with Minus' icon / toggle all button
+            var allImagesAndLinks = document.querySelectorAll("img, a, input[type='image'], input[type='button'], button, span");
+            var clicked = false;
+
+            for (var i = 0; i < allImagesAndLinks.length; i++) {
+                var el = allImagesAndLinks[i];
+                var src = (el.src || el.getAttribute('src') || '').toLowerCase();
+                var onclick = (el.getAttribute('onclick') || '').toLowerCase();
+                var alt = (el.alt || el.title || el.className || el.id || '').toLowerCase();
+
+                // Matches 'minus', 'collapse', 'allclose', 'toggle', 'fold' icons
+                if (src.includes('minus') || src.includes('close') || src.includes('collapse') ||
+                    onclick.includes('allclose') || onclick.includes('toggle') || onclick.includes('fold') ||
+                    alt.includes('minus') || alt.includes('collapse') || alt.includes('all close')) {
+                    el.click();
+                    clicked = true;
+                    break;
                 }
             }
 
-            // 2. Scroll the window down directly to the Feedback block
+            // 2. Ensure the Feedback section (swFeedbackBlock) is expanded and scrolled into view
+            if (typeof openArea === 'function') {
+                try { openArea('swFeedbackBlock'); } catch(e){}
+            }
             var fb = document.getElementById("swFeedbackBlock");
             if (fb) {
                 fb.style.display = 'block';
@@ -1194,23 +1200,26 @@ def open_reply_field(driver, sel: dict, timeout: int, logger: logging.Logger):
             } else {
                 window.scrollTo({ top: document.body.scrollHeight / 2, behavior: 'smooth' });
             }
+            return clicked;
         """
-        driver.execute_script(js_click_feedback_logo)
+        was_clicked = driver.execute_script(js_click_minus_logo)
+        if was_clicked:
+            logger.info("  ✓ Clicked 'Page with Minus' toggle logo to scroll down to Feedback.")
         time.sleep(0.4)
     except Exception as e:
-        logger.debug(f"  Top logo/link scroll notice: {e}")
+        logger.debug(f"  Minus logo click notice: {e}")
 
-    # Fallback: Click top Feedback link via XPath
+    # Fallback: Click minus/collapse icon via XPath
     try:
-        fb_top_links = driver.find_elements(
+        minus_icons = driver.find_elements(
             By.XPATH,
-            "//a[contains(translate(., 'FEEDBACK', 'feedback'), 'feedback')] | "
-            "//img[contains(@alt, 'Feedback') or contains(@src, 'feedback')] | "
-            "//a[contains(@href, 'Feedback') or contains(@href, 'swFeedbackBlock')]"
+            "//img[contains(@src, 'minus') or contains(@src, 'close') or contains(@alt, 'minus') or contains(@title, 'minus')] | "
+            "//a[contains(@onclick, 'allClose') or contains(@onclick, 'toggle') or contains(@href, 'allClose')]"
         )
-        for fl in fb_top_links:
+        for mi in minus_icons:
             try:
-                fl.click()
+                mi.click()
+                logger.info("  ✓ Clicked minus toggle icon via XPath.")
                 time.sleep(0.3)
                 break
             except Exception:
