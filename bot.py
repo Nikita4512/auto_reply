@@ -1704,9 +1704,9 @@ def run_bot(
         # MODE 1: SINGLE FTIR TEST MODE
         # ===================================================================
         if target_ftir:
-            reply_text = sample_reply
-            # Automatically load reply from Excel for this specific FTIR
-            if not reply_text and os.path.isfile(excel_path):
+            # ALWAYS load reply from Excel first for this FTIR number
+            reply_text = None
+            if os.path.isfile(excel_path):
                 try:
                     wb_test = openpyxl.load_workbook(excel_path)
                     sh_test = wb_test.active
@@ -1717,14 +1717,21 @@ def run_bot(
                         f_v = str(sh_test.cell(row=row_i, column=f_col).value or "").strip()
                         if f_v.lower() == target_ftir.strip().lower():
                             reply_text = str(sh_test.cell(row=row_i, column=r_col).value or "").strip()
-                            logger.info(f"Loaded Excel reply for {target_ftir} (Row {row_i}) ✓")
+                            logger.info(f"  ✓ Loaded reply from Excel 'Individual Reply' column (Row {row_i})")
+                            logger.info(f"  Reply preview: {reply_text[:80]}...")
                             break
                     wb_test.close()
                 except Exception as ex:
-                    logger.debug(f"Excel reply lookup notice: {ex}")
+                    logger.warning(f"  Excel reply lookup failed: {ex}")
+
+            # Only use --reply argument or fallback if Excel had no match
+            if not reply_text and sample_reply:
+                reply_text = sample_reply
+                logger.info(f"  Using --reply argument text (not from Excel).")
 
             if not reply_text:
-                reply_text = "The customer concern was thoroughly reviewed by dealer team and necessary corrective action completed."
+                logger.error(f"  ERROR: No reply found in Excel for FTIR {target_ftir}. Cannot proceed.")
+                return
 
             logger.info(f"Processing Single FTIR: {redact_ftir(target_ftir)}")
             logger.info(f"Reply text to write: {reply_text[:60]}...")
@@ -1951,7 +1958,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="FTIR Reply Automation Bot")
     parser.add_argument("--ftir", type=str, help="Single FTIR number to process (skips Excel)")
-    parser.add_argument("--reply", type=str, default="hii,this is teh reply", help="Test reply text for single FTIR test")
+    parser.add_argument("--reply", type=str, default=None, help="Override reply text (if omitted, reads from Excel)")
     parser.add_argument("--attach", action="store_true", help="Attach to open Chrome browser on port 9222")
     parser.add_argument("--port", type=int, default=9222, help="Chrome Remote Debugging Port (default 9222)")
     parser.add_argument("--dry-run", action="store_true", help="Paste and verify reply but DO NOT click Save")
