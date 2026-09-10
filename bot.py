@@ -1130,19 +1130,19 @@ def check_existing_reply(driver, textarea, logger: logging.Logger):
 def find_feedback_frame(driver, logger: logging.Logger):
     """
     Search top-level document and all frames/iframes for the Feedback / Reply section.
-    Switches driver into the correct frame and returns True if found.
+    Switches driver into the correct frame and returns the frame WebElement that was
+    switched into, or None if the content is in the top-level document (no switch needed),
+    or False if not found at all.
+
+    IMPORTANT: Returns the actual frame element so callers can re-enter it precisely.
     """
-    # 1. Check top-level document first
+    # 1. Check all frames and iframes FIRST (SIFT almost always puts content in a frame)
     driver.switch_to.default_content()
     try:
-        src = driver.page_source.lower()
-        if "swfeedbackblock" in src or "reply individually" in src or "representative reply" in src:
-            return True
+        frames = driver.find_elements(By.TAG_NAME, "frame") + driver.find_elements(By.TAG_NAME, "iframe")
     except Exception:
-        pass
+        frames = []
 
-    # 2. Check all frames and iframes
-    frames = driver.find_elements(By.TAG_NAME, "frame") + driver.find_elements(By.TAG_NAME, "iframe")
     for i, fr in enumerate(frames):
         try:
             driver.switch_to.default_content()
@@ -1150,24 +1150,50 @@ def find_feedback_frame(driver, logger: logging.Logger):
             src = driver.page_source.lower()
             if "swfeedbackblock" in src or "reply individually" in src or "representative reply" in src:
                 logger.info(f"  Switched to frame {i} containing SIFT feedback section.")
-                return True
+                return fr   # ← return the frame element so caller can re-enter
         except Exception:
             continue
 
+    # 2. Fallback: check top-level document
     driver.switch_to.default_content()
-    return False
+    try:
+        src = driver.page_source.lower()
+        if "swfeedbackblock" in src or "reply individually" in src or "representative reply" in src:
+            logger.info("  Feedback section found in top-level document (no frame switch).")
+            return None  # ← None means "top-level, no switch needed"
+    except Exception:
+        pass
+
+    return False  # ← not found anywhere
 
 
 def open_reply_field(driver, sel: dict, timeout: int, logger: logging.Logger):
     """
     On SIFT FTIR record page:
-    1. Switch to the correct content frame.
+    1. Switch to the correct content frame (and remember it for re-entry).
     2. Click the 'Page with Minus sign' toggle logo / icon to collapse upper sections.
     3. Ensure Feedback Block (swFeedbackBlock) is expanded.
-    4. Select 'Reply individually.' radio button.
+    4. Select 'Reply individually.' radio button — VERIFIED via DOM before continuing.
     5. Return the exact Individual Reply textarea element.
+
+    HARD GATE: Will raise RuntimeError if radio cannot be confirmed selected.
     """
-    find_feedback_frame(driver, logger)
+    # --- Step 1: Find and enter the feedback frame, save reference for re-entry ---
+    feedback_frame = find_feedback_frame(driver, logger)
+    # feedback_frame is:
+    #   <WebElement>  → we are now inside that frame, re-enter with switch_to.frame(feedback_frame)
+    #   None          → top-level document, no switch needed
+    #   False         → not found (proceed anyway, may work)
+
+    def _reenter_frame():
+        """Re-enter the feedback frame reliably before any DOM query."""
+        try:
+            driver.switch_to.default_content()
+            if feedback_frame is not None and feedback_frame is not False:
+                driver.switch_to.frame(feedback_frame)
+        except Exception:
+            # Frame reference stale — do a fresh search
+            find_feedback_frame(driver, logger)
 
     # 1. Click the 'Page with Minus sign' toggle logo / icon to collapse upper sections
     try:
@@ -1246,135 +1272,166 @@ def open_reply_field(driver, sel: dict, timeout: int, logger: logging.Logger):
     except Exception:
         pass
 
-    # 2. Select 'Reply individually.' radio button — with DOM-verified confirmation
-    #    The bot will NOT proceed to find the textarea unless this radio is
-    #    confirmed as checked (blue) in the DOM.
+    # 3. Select 'Reply individually.' radio button — with DOM-verified confirmation.
+    #    _reenter_frame() is called before EVERY DOM query to guarantee correct context.
+    #    Text matching uses exact phrase "reply individually" — not just "individual" —
+    #    to prevent matching the "Apply representative reply with individual modification" row.
+    #    HARD GATE: function raises RuntimeError if radio cannot be confirmed selected.
 
-    class RadioNotSelectedError(Exception):
+    class RadioNotSelectedError(RuntimeError):
         pass
 
-    def _is_radio_checked(drv):
-        """Return True if the 'Reply individually' radio is currently checked in the DOM."""
-        return drv.execute_script("""
-            var radios = document.querySelectorAll("input[type='radio']");
-            for (var i = 0; i < radios.length; i++) {
-                var r = radios[i];
-                var row = r.closest("tr") || r.parentElement;
-                var txt = ((row ? row.innerText : "") + " " + (r.name || "") + " " + (r.value || "")).toLowerCase();
-                if (txt.includes("individually") || txt.includes("individual")) {
-                    return r.checked === true;
-                }
+    # JS snippet: return True if the 'Reply individually' radio is checked.
+    # Uses exact phrase match on the full row text.
+    JS_IS_CHECKED = """
+        var radios = document.querySelectorAll("input[type='radio']");
+        for (var i = 0; i < radios.length; i++) {
+            var r = radios[i];
+            var row = r.closest("tr") || r.parentElement;
+            var rowTxt = (row ? (row.innerText || row.textContent || '') : '').toLowerCase();
+            if (rowTxt.includes("reply individually")) {
+                return r.checked === true;
             }
-            return false;
-        """)
+        }
+        return false;
+    """
 
-    def _get_radio_element(drv):
-        """Return the 'Reply individually' radio WebElement, or None if not found."""
+    # JS snippet: fire proper mouse events then set checked (correct event order).
+    JS_CLICK_RADIO = """
+        var radios = document.querySelectorAll("input[type='radio']");
+        for (var i = 0; i < radios.length; i++) {
+            var r = radios[i];
+            var row = r.closest("tr") || r.parentElement;
+            var rowTxt = (row ? (row.innerText || row.textContent || '') : '').toLowerCase();
+            if (rowTxt.includes("reply individually")) {
+                r.removeAttribute('disabled');
+                r.scrollIntoView({block: 'center'});
+                r.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, cancelable:true}));
+                r.dispatchEvent(new MouseEvent('mouseup',   {bubbles:true, cancelable:true}));
+                r.dispatchEvent(new MouseEvent('click',     {bubbles:true, cancelable:true}));
+                r.checked = true;
+                r.dispatchEvent(new Event('change', {bubbles:true}));
+                return true;
+            }
+        }
+        return false;
+    """
+
+    def _is_radio_checked():
+        """Re-enter frame then check DOM state. Returns True/False."""
+        _reenter_frame()
+        try:
+            return bool(driver.execute_script(JS_IS_CHECKED))
+        except Exception:
+            return False
+
+    def _get_radio_element():
+        """Re-enter frame then return the radio WebElement, or None."""
+        _reenter_frame()
         xpaths = [
-            "//tr[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'individually')]//input[@type='radio']",
-            "//input[@type='radio' and contains(translate(@value,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'individual')]",
+            # Exact row text match — must contain 'reply individually' (case-insensitive)
+            "//tr[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'reply individually')]//input[@type='radio']",
+            # Fallback: input whose value attribute contains 'individually'
+            "//input[@type='radio' and contains(translate(@value,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'individually')]",
         ]
         for xp in xpaths:
-            els = drv.find_elements(By.XPATH, xp)
-            if els:
-                return els[0]
+            try:
+                els = driver.find_elements(By.XPATH, xp)
+                if els:
+                    return els[0]
+            except Exception:
+                continue
         return None
 
-    def _get_label_element(drv):
-        """Return a clickable label/text element for 'Reply individually', or None."""
+    def _get_label_element():
+        """Re-enter frame then return a clickable label for 'Reply individually', or None."""
+        _reenter_frame()
         xpaths = [
             "//label[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'reply individually')]",
             "//td[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'reply individually')]",
             "//*[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'reply individually')]",
         ]
         for xp in xpaths:
-            els = drv.find_elements(By.XPATH, xp)
-            if els:
-                return els[0]
+            try:
+                els = driver.find_elements(By.XPATH, xp)
+                if els:
+                    return els[0]
+            except Exception:
+                continue
         return None
 
     radio_confirmed = False
     MAX_RADIO_ATTEMPTS = 5
 
-    # If already selected from a previous run, just confirm and skip clicking
-    try:
-        if _is_radio_checked(driver):
-            logger.info("  ✓ 'Reply individually' radio already selected — skipping click.")
-            radio_confirmed = True
-    except Exception:
-        pass
+    # Quick pre-check: already selected from a prior interaction? Skip clicking.
+    if _is_radio_checked():
+        logger.info("  ✓ 'Reply individually' radio already selected — skipping click.")
+        radio_confirmed = True
 
     if not radio_confirmed:
         for attempt in range(1, MAX_RADIO_ATTEMPTS + 1):
             logger.info(f"  [Radio] Attempt {attempt}/{MAX_RADIO_ATTEMPTS} — clicking 'Reply individually'...")
             try:
-                # Strategy A: Real Selenium click on the radio element itself
-                radio_el = _get_radio_element(driver)
+                # === Strategy A: Real Selenium .click() on the radio input element ===
+                _reenter_frame()
+                radio_el = _get_radio_element()
                 if radio_el:
                     driver.execute_script(
                         "arguments[0].removeAttribute('disabled'); arguments[0].scrollIntoView({block:'center'});",
                         radio_el
                     )
-                    time.sleep(0.15)
+                    time.sleep(0.2)
                     try:
                         radio_el.click()
                     except Exception:
                         driver.execute_script("arguments[0].click();", radio_el)
-                    time.sleep(0.4)
+                    time.sleep(0.5)
 
-                    if _is_radio_checked(driver):
-                        logger.info(f"  ✓ Radio confirmed SELECTED (blue) after Strategy A (attempt {attempt}).")
+                    if _is_radio_checked():
+                        logger.info(f"  ✓ Radio CONFIRMED SELECTED (blue) via Strategy A (attempt {attempt}).")
                         radio_confirmed = True
                         break
 
-                # Strategy B: Click the associated label / row text
-                label_el = _get_label_element(driver)
+                # === Strategy B: Click the label / row text beside the radio ===
+                _reenter_frame()
+                label_el = _get_label_element()
                 if label_el:
                     driver.execute_script("arguments[0].scrollIntoView({block:'center'});", label_el)
-                    time.sleep(0.15)
+                    time.sleep(0.2)
                     try:
                         label_el.click()
                     except Exception:
                         driver.execute_script("arguments[0].click();", label_el)
-                    time.sleep(0.4)
+                    time.sleep(0.5)
 
-                    if _is_radio_checked(driver):
-                        logger.info(f"  ✓ Radio confirmed SELECTED (blue) after Strategy B (attempt {attempt}).")
+                    if _is_radio_checked():
+                        logger.info(f"  ✓ Radio CONFIRMED SELECTED (blue) via Strategy B (attempt {attempt}).")
                         radio_confirmed = True
                         break
 
-                # Strategy C: JavaScript direct click (fires events in correct order: click → change)
-                driver.execute_script("""
-                    var radios = document.querySelectorAll("input[type='radio']");
-                    for (var i = 0; i < radios.length; i++) {
-                        var r = radios[i];
-                        var row = r.closest("tr") || r.parentElement;
-                        var txt = ((row ? row.innerText : "") + " " + (r.name || "") + " " + (r.value || "")).toLowerCase();
-                        if (txt.includes("individually") || txt.includes("individual")) {
-                            r.removeAttribute('disabled');
-                            r.scrollIntoView({block: 'center'});
-                            r.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true}));
-                            r.dispatchEvent(new MouseEvent('mouseup',   {bubbles: true, cancelable: true}));
-                            r.dispatchEvent(new MouseEvent('click',     {bubbles: true, cancelable: true}));
-                            r.checked = true;
-                            r.dispatchEvent(new Event('change', {bubbles: true}));
-                            break;
-                        }
-                    }
-                """)
-                time.sleep(0.4)
+                # === Strategy C: Full JS click sequence (mousedown→mouseup→click→checked→change) ===
+                _reenter_frame()
+                fired = driver.execute_script(JS_CLICK_RADIO)
+                logger.debug(f"  [Radio] JS_CLICK_RADIO fired={fired}")
+                time.sleep(0.5)
 
-                if _is_radio_checked(driver):
-                    logger.info(f"  ✓ Radio confirmed SELECTED (blue) after Strategy C (attempt {attempt}).")
+                if _is_radio_checked():
+                    logger.info(f"  ✓ Radio CONFIRMED SELECTED (blue) via Strategy C (attempt {attempt}).")
                     radio_confirmed = True
                     break
 
-                logger.warning(f"  [Radio] Attempt {attempt} — radio still NOT checked after all strategies. Retrying...")
-                time.sleep(0.5)
+                logger.warning(
+                    f"  [Radio] Attempt {attempt}/{MAX_RADIO_ATTEMPTS} — all 3 strategies tried, "
+                    f"radio still NOT checked. Retrying after pause..."
+                )
+                time.sleep(0.8)
 
             except StaleElementReferenceException:
-                logger.debug(f"  [Radio] StaleElementReferenceException on attempt {attempt} — re-entering frame and retrying.")
-                find_feedback_frame(driver, logger)
+                logger.debug(
+                    f"  [Radio] StaleElementReferenceException on attempt {attempt} — "
+                    "re-entering frame and retrying."
+                )
+                _reenter_frame()
                 time.sleep(0.4)
             except Exception as e:
                 logger.debug(f"  [Radio] Unexpected error on attempt {attempt}: {e}")
@@ -1382,13 +1439,17 @@ def open_reply_field(driver, sel: dict, timeout: int, logger: logging.Logger):
 
     if not radio_confirmed:
         raise RadioNotSelectedError(
-            "FATAL: Could not confirm 'Reply individually' radio as selected (checked/blue) "
-            f"after {MAX_RADIO_ATTEMPTS} attempts. "
-            "NOT typing reply or saving to avoid corrupting the wrong field. "
-            "Check the portal manually — the radio button may have changed its DOM structure."
+            f"FATAL: 'Reply individually' radio could NOT be confirmed selected after "
+            f"{MAX_RADIO_ATTEMPTS} attempts using 3 strategies each. "
+            "The bot will NOT type the reply or click Save. "
+            "This record is marked Failed. Inspect the portal manually — "
+            "the radio DOM structure may have changed."
         )
 
+    logger.info("  ✓ 'Reply individually' radio gate passed — proceeding to locate textarea.")
     time.sleep(0.2)
+    _reenter_frame()  # Ensure correct frame context before textarea search
+
 
     # 3. Locate the EXACT textarea beside [Final] in the 'Reply individually' row
     # The page layout is:
