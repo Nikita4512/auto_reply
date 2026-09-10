@@ -1293,66 +1293,81 @@ def open_reply_field(driver, sel: dict, timeout: int, logger: logging.Logger):
     # The page layout is:
     #   Row: (●) Reply individually. | [Final] | [textarea] ← THIS IS THE TARGET
     #   ...
-    #   Reply Currently Announced to Report Co. | [input]   ← NOT THIS ONE
+    #   Reply Currently Announced to Report Co. | [input]   ← EXPLICITLY EXCLUDED
+    #
+    # ROOT CAUSE OF PREVIOUS BUG: fallback methods used tas[last] which picked
+    # the 'Reply Currently Announced' textarea at the bottom of the page.
+    # FIX: All methods now strictly anchor to the 'Reply individually' radio row
+    # and explicitly skip any row mentioning 'announced' or 'currently'.
     target_box = None
     try:
         js_find_ta = """
-            // === METHOD 1: Find the [Final] label, then get the textarea next to it ===
-            var allElements = document.querySelectorAll("td, th, span, div, font, b, label");
-            for (var i = 0; i < allElements.length; i++) {
-                var el = allElements[i];
-                var t = (el.innerText || el.textContent || "").trim();
-                if (t === "[Final]" || t === "Final" || t.toLowerCase() === "[final]") {
-                    // Found [Final] label! Now find the textarea next to it.
-                    
-                    // Check: is there a textarea in the same <td> cell?
-                    var parentTd = el.closest("td");
-                    if (parentTd) {
-                        var ta = parentTd.querySelector("textarea");
-                        if (ta) return ta;
-                        
-                        // Check the NEXT sibling <td> cell
-                        var nextTd = parentTd.nextElementSibling;
-                        if (nextTd) {
-                            ta = nextTd.querySelector("textarea");
-                            if (ta) return ta;
-                        }
-                    }
-                    
-                    // Check the parent <tr> row
-                    var parentTr = el.closest("tr");
-                    if (parentTr) {
-                        var tas = parentTr.querySelectorAll("textarea");
-                        if (tas.length > 0) return tas[tas.length - 1];
-                    }
-                    
-                    break;  // [Final] found but no textarea beside it
-                }
+            // Helper: check if a row is the 'Reply Currently Announced' row (must be excluded)
+            function isAnnouncedRow(tr) {
+                var txt = (tr ? (tr.innerText || tr.textContent || '') : '').toLowerCase();
+                return txt.includes('announced') || txt.includes('currently') || txt.includes('report co');
             }
 
-            // === METHOD 2: Find all rows, pick the one with BOTH radio + [Final] ===
-            var allTrs = document.querySelectorAll("tr");
-            for (var j = 0; j < allTrs.length; j++) {
-                var tr = allTrs[j];
-                var trTxt = (tr.innerText || "").toLowerCase();
+            // Helper: check if a row is the 'Reply individually' radio row
+            function isIndividuallyRow(tr) {
+                var txt = (tr ? (tr.innerText || tr.textContent || '') : '').toLowerCase();
                 var hasRadio = tr.querySelector("input[type='radio']") !== null;
-                var hasFinal = trTxt.includes("[final]") || trTxt.includes("final");
-                var hasIndividually = trTxt.includes("individually");
-                
-                if (hasRadio && (hasFinal || hasIndividually)) {
-                    // This is the Reply individually row
-                    var tas = tr.querySelectorAll("textarea");
-                    if (tas.length > 0) return tas[tas.length - 1];
+                return hasRadio && (txt.includes('individually') || txt.includes('individual'));
+            }
+
+            // === METHOD 1 (PRIMARY): Find the radio button for 'Reply individually',
+            //     get its <tr> row, then pick the textarea in THAT SAME ROW only. ===
+            var allRadios = document.querySelectorAll("input[type='radio']");
+            for (var i = 0; i < allRadios.length; i++) {
+                var r = allRadios[i];
+                var row = r.closest('tr');
+                if (!row) continue;
+                if (isAnnouncedRow(row)) continue;  // ← skip the wrong row
+                var rowTxt = (row.innerText || row.textContent || '').toLowerCase();
+                if (rowTxt.includes('individually') || rowTxt.includes('individual')) {
+                    // This IS the 'Reply individually' row. Get its textarea.
+                    var rowTas = row.querySelectorAll('textarea');
+                    if (rowTas.length > 0) return rowTas[rowTas.length - 1];
                 }
             }
 
-            // === METHOD 3: Checked radio → same row's textarea ===
+            // === METHOD 2: Find the [Final] label and grab the textarea in the SAME ROW,
+            //     but ONLY if the row is not the 'announced' row. ===
+            var allEls = document.querySelectorAll('td, th, span, div, font, b, label');
+            for (var j = 0; j < allEls.length; j++) {
+                var el = allEls[j];
+                var t = (el.innerText || el.textContent || '').trim();
+                if (t === '[Final]' || t === 'Final' || t.toLowerCase() === '[final]') {
+                    var parentTr = el.closest('tr');
+                    if (parentTr && !isAnnouncedRow(parentTr)) {
+                        // Same <td> as [Final]
+                        var parentTd = el.closest('td');
+                        if (parentTd) {
+                            var ta = parentTd.querySelector('textarea');
+                            if (ta) return ta;
+                            // Next sibling <td>
+                            var nextTd = parentTd.nextElementSibling;
+                            if (nextTd) {
+                                ta = nextTd.querySelector('textarea');
+                                if (ta) return ta;
+                            }
+                        }
+                        // Anywhere in the same row
+                        var rowTas2 = parentTr.querySelectorAll('textarea');
+                        if (rowTas2.length > 0) return rowTas2[rowTas2.length - 1];
+                    }
+                    break;
+                }
+            }
+
+            // === METHOD 3 (last resort): checked radio → same row textarea,
+            //     skip if that row is the 'announced' row. ===
             var checkedRadio = document.querySelector("input[type='radio']:checked");
             if (checkedRadio) {
-                var row = checkedRadio.closest("tr");
-                if (row) {
-                    var tas = row.querySelectorAll("textarea");
-                    if (tas.length > 0) return tas[tas.length - 1];
+                var crow = checkedRadio.closest('tr');
+                if (crow && !isAnnouncedRow(crow)) {
+                    var ctas = crow.querySelectorAll('textarea');
+                    if (ctas.length > 0) return ctas[ctas.length - 1];
                 }
             }
 
@@ -1362,15 +1377,28 @@ def open_reply_field(driver, sel: dict, timeout: int, logger: logging.Logger):
     except Exception as e:
         logger.debug(f"  JS box locate notice: {e}")
 
-    # Log what we found (for debugging)
+    # Log what we found (for debugging) and confirm it is NOT the announced box
     if target_box:
         try:
-            tag = driver.execute_script("return arguments[0].tagName;", target_box)
+            tag  = driver.execute_script("return arguments[0].tagName;", target_box)
             name = driver.execute_script("return arguments[0].name || arguments[0].id || 'unnamed';", target_box)
-            logger.info(f"  ✓ Found target element: <{tag}> name/id='{name}'")
+            # Safety guard: verify the found element is not inside the 'announced' row
+            in_announced = driver.execute_script("""
+                var el = arguments[0];
+                var row = el.closest('tr');
+                if (!row) return false;
+                var txt = (row.innerText || row.textContent || '').toLowerCase();
+                return txt.includes('announced') || txt.includes('currently') || txt.includes('report co');
+            """, target_box)
+            if in_announced:
+                logger.warning("  ⚠ JS located the 'announced' textarea — discarding and trying XPath fallback.")
+                target_box = None
+            else:
+                logger.info(f"  ✓ Found target element: <{tag}> name/id='{name}' (verified NOT announced row)")
         except Exception:
             pass
 
+    if target_box:
         # Unlock, scroll to it, and click INTO it with a real mouse click
         try:
             driver.execute_script("""
@@ -1392,22 +1420,35 @@ def open_reply_field(driver, sel: dict, timeout: int, logger: logging.Logger):
         logger.info("  ✓ Clicked into 'Reply individually' textarea beside '[Final]'.")
         return target_box
 
-    # XPath fallback — find textarea in same row as [Final]
+    # XPath fallback — strictly require the row to contain 'individually' and NOT 'announced'
     try:
         xpath_options = [
+            # [Final] sibling textarea, row must NOT mention announced/currently
+            "//tr[input[@type='radio'] and contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'individually') and not(contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'announced'))]//textarea",
             "//td[contains(., '[Final]')]/following-sibling::td//textarea",
             "//td[contains(., '[Final]')]//textarea",
-            "//tr[contains(., '[Final]')]//textarea",
-            "//tr[contains(., 'Reply individually')]//textarea",
+            "//tr[contains(., '[Final]') and not(contains(., 'Announced'))]//textarea",
         ]
         for xp in xpath_options:
             tas = driver.find_elements(By.XPATH, xp)
             if tas:
-                chosen = tas[-1]
-                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", chosen)
-                ActionChains(driver).move_to_element(chosen).click().perform()
-                logger.info(f"  ✓ Found textarea via XPath: {xp}")
-                return chosen
+                # Extra guard: skip any element whose row text mentions 'announced'
+                for candidate in tas:
+                    try:
+                        in_ann = driver.execute_script("""
+                            var el = arguments[0];
+                            var row = el.closest('tr');
+                            if (!row) return false;
+                            var txt = (row.innerText || '').toLowerCase();
+                            return txt.includes('announced') || txt.includes('currently') || txt.includes('report co');
+                        """, candidate)
+                        if not in_ann:
+                            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", candidate)
+                            ActionChains(driver).move_to_element(candidate).click().perform()
+                            logger.info(f"  ✓ Found textarea via XPath (excluded announced): {xp}")
+                            return candidate
+                    except Exception:
+                        continue
     except Exception:
         pass
 
@@ -1443,16 +1484,38 @@ def paste_reply(
                 var val = arguments[1];
                 var el = arguments[0];
 
-                // Re-find target textarea if reference was lost or invalid
+                // Re-find target textarea if reference was lost or invalid.
+                // IMPORTANT: Must re-use the strict 'Reply individually' row logic
+                // to avoid accidentally picking 'Reply Currently Announced' textarea.
                 if (!el || el.tagName.toLowerCase() !== 'textarea') {
-                    var feedback = document.getElementById("swFeedbackBlock");
-                    if (feedback) {
-                        var tas = feedback.querySelectorAll("textarea");
-                        el = (tas.length >= 3) ? tas[2] : tas[tas.length - 1];
+                    // Strict search: find the radio row for 'individually', skip 'announced' rows
+                    var allRadios = document.querySelectorAll("input[type='radio']");
+                    for (var ri = 0; ri < allRadios.length; ri++) {
+                        var rrow = allRadios[ri].closest('tr');
+                        if (!rrow) continue;
+                        var rrowTxt = (rrow.innerText || rrow.textContent || '').toLowerCase();
+                        if (rrowTxt.includes('announced') || rrowTxt.includes('currently') || rrowTxt.includes('report co')) continue;
+                        if (rrowTxt.includes('individually') || rrowTxt.includes('individual')) {
+                            var rtas = rrow.querySelectorAll('textarea');
+                            if (rtas.length > 0) { el = rtas[rtas.length - 1]; break; }
+                        }
                     }
+                    // Secondary: look for [Final] label row, exclude announced rows
                     if (!el) {
-                        var allTas = document.querySelectorAll("textarea");
-                        if (allTas.length > 0) el = allTas[allTas.length - 1];
+                        var allEls2 = document.querySelectorAll('td, span, b, label, font');
+                        for (var ei = 0; ei < allEls2.length; ei++) {
+                            var etxt = (allEls2[ei].innerText || allEls2[ei].textContent || '').trim();
+                            if (etxt === '[Final]' || etxt === 'Final' || etxt.toLowerCase() === '[final]') {
+                                var etr = allEls2[ei].closest('tr');
+                                if (etr) {
+                                    var etrtxt = (etr.innerText || '').toLowerCase();
+                                    if (!etrtxt.includes('announced') && !etrtxt.includes('currently')) {
+                                        var etas = etr.querySelectorAll('textarea');
+                                        if (etas.length > 0) { el = etas[etas.length - 1]; break; }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 
