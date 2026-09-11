@@ -11,27 +11,19 @@ Reads FTIR case numbers and pre-written replies from an Excel file (or single CL
 pip install -r requirements.txt
 ```
 
-### Step 2: Run the Bot (1 Command)
+### Step 2: Run the Bot (Single Command)
 
-#### Option A: Test Single FTIR Number
 ```cmd
-python bot.py --ftir AE20250B00111
+python bot.py
 ```
-* **What happens automatically:**
-  1. Microsoft Edge opens automatically to the SIFT portal.
-  2. Log into SIFT in the Edge window and press **ENTER** in your terminal.
-  3. The bot automatically navigates to **QUICK SEARCH**, enters `AE20250B00111`, selects **Reply individually.**, pastes the reply, and verifies it!
-
-* If you want it to also click **Complete** (Save) automatically:
-  ```cmd
-  python bot.py --ftir AE20250B00111 --reply "Your test reply message" --live
-  ```
+* The bot defaults directly to **LIVE execution** — it opens the portal, processes all pending FTIR rows from `FTIR_Replies.xlsx`, pastes each reply, clicks **Complete (Save)**, and updates the Excel sheet immediately without stopping for confirmation prompts.
 
 ---
 
-#### Option B: Process Full Excel Sheet (`FTIR_Replies.xlsx`)
+### Optional Single FTIR Test:
+If you ever want to test a single FTIR number:
 ```cmd
-python bot.py --live
+python bot.py --ftir AE20250B00111
 ```
 
 ---

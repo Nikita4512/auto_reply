@@ -496,10 +496,10 @@ def pre_validate_ftir_on_portal(
         close_extra_windows(driver, logger)
 
 
-def print_preflight_and_confirm(summary: dict, dry_run: bool, logger: logging.Logger) -> bool:
+def print_preflight_and_confirm(summary: dict, dry_run: bool, logger: logging.Logger, config: dict = None) -> bool:
     """
-    Print preflight summary and ask for y/n confirmation.
-    Returns True if user confirms, False otherwise.
+    Print preflight summary. If require_confirmation is True in config,
+    ask for y/n confirmation. Otherwise, auto-proceed immediately.
     """
     logger.info("")
     logger.info("=" * 70)
@@ -526,8 +526,14 @@ def print_preflight_and_confirm(summary: dict, dry_run: bool, logger: logging.Lo
         logger.info("No pending rows to process. Exiting.")
         return False
 
-    # --- preflight --- Require manual y/n confirmation before proceeding
-    print()  # blank line for readability
+    # Auto-proceed immediately unless explicitly configured to prompt
+    require_confirm = config.get("require_confirmation", False) if config else False
+    if not require_confirm:
+        logger.info("Starting bot execution immediately...")
+        return True
+
+    # Require manual y/n confirmation if require_confirmation is true
+    print()
     prompt = "Proceed? (y/n): "
     if dry_run:
         prompt = "Proceed with DRY RUN? (y/n): "
@@ -1945,7 +1951,7 @@ def run_bot(
         logger.debug(f"  Column mapping: {col_map}")
 
         preflight_summary = preflight_validate(sheet, col_map, config, dry_run, logger)
-        if not print_preflight_and_confirm(preflight_summary, dry_run, logger):
+        if not print_preflight_and_confirm(preflight_summary, dry_run, logger, config=config):
             wb.close()
             return
 
@@ -2231,7 +2237,8 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    override_dry = True if args.dry_run else (False if args.live else None)
+    # Default to live run (clicks Save/Complete). Only dry-run if --dry-run is explicitly passed.
+    override_dry = True if args.dry_run else False
 
     run_bot(
         target_ftir=args.ftir,
